@@ -1,0 +1,202 @@
+"""Native MLP LoRA recovery. Successful recovery merges the best dev adapter.
+
+Base weights remain unchanged until final merge; failures remove every adapter.
+Only the best checkpoint's adapter tensors are kept, on CPU.
+"""
+import math
+import random
+
+import torch
+from torch import nn
+
+from .modeling import mlp_layers
+from .metrics import selection_score, score_name
+
+
+class LoRALinear(nn.Module):
+    def __init__(self, base, rank=8, alpha=16):
+        super().__init__()
+        if not isinstance(base, nn.Linear) or rank < 1 or not math.isfinite(alpha) or alpha <= 0:
+            raise ValueError("LoRA needs a Linear, positive rank and finite positive alpha")
+        self.base = base
+        self.scale = alpha / rank
+        self.A = nn.Parameter(base.weight.new_empty(rank, base.in_features))
+        self.B = nn.Parameter(base.weight.new_zeros(base.out_features, rank))
+        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
+        self.base.requires_grad_(False)
+
+    def forward(self, inputs):
+        return self.base(inputs) + (inputs @ self.A.t() @ self.B.t()) * self.scale
+
+    @torch.no_grad()
+    def merge(self):
+        self.base.weight.add_(self.B @ self.A, alpha=self.scale)
+        return self.base
+
+
+def _metric(metrics):
+    accuracy = selection_score(metrics)
+    loss = float(metrics.get('answer_token_loss', metrics.get('loss', float('nan'))))
+    if not math.isfinite(accuracy) or not math.isfinite(loss) or loss < 0 or not 0 <= accuracy <= 1:
+        raise ValueError('Development score and loss must be finite, score in [0, 1], loss >= 0')
+    return accuracy, -loss
+
+
+def recover_model(model, train_batches, evaluate_dev, config):
+    """Train adapters on answer-only batches and merge the best development state.
+
+    ``evaluate_dev(model)`` returns selection_score (or accuracy) and answer_token_loss (or loss).
+    ``max_steps`` counts optimizer updates. Data are shuffled per epoch and a
+    final partial accumulation group is normalized by its actual target tokens.
+    Step zero participates in selection, so recovery can retain the original.
+    Evaluation callbacks may change mode/gradient flags; these are restored.
+    """
+    rank, alpha = config.get('rank', 8), config.get('alpha', 16)
+    steps = config.get('max_steps', 200)
+    accumulation = config.get('gradient_accumulation', 4)
+    lr, clip = config.get('learning_rate', 2e-4), config.get('max_grad_norm', 1.0)
+    checkpoints = set(config.get('checkpoints', [50, 100, 200])) | {steps}
+    if any(type(v) is not int or v < 1 for v in (rank, steps, accumulation)):
+        raise ValueError('rank, max_steps, gradient_accumulation must be positive integers')
+    if any(type(v) is not int or v < 1 for v in checkpoints):
+        raise ValueError('checkpoints must be positive integer optimizer steps')
+    if any(not math.isfinite(v) or v <= 0 for v in (alpha, lr, clip)):
+        raise ValueError('alpha, learning_rate and max_grad_norm must be positive and finite')
+    batches = list(train_batches)
+    if not batches:
+        raise ValueError('Recovery requires supervised batches')
+    token_counts = []
+    for batch in batches:
+        labels = batch['labels']
+        if labels.ndim != 2 or labels.shape[0] != 1:
+            raise ValueError('Recovery requires batch size one')
+        n = int((labels[:, 1:] != -100).sum())
+        if not n or int(labels[0, 0]) != -100:
+            raise ValueError('Recovery batches require answer tokens and masked prompt labels')
+        ids = batch['input_ids']
+        if ids.shape != labels.shape or not torch.equal(ids[labels != -100], labels[labels != -100]):
+            raise ValueError('Recovery labels must match input answer tokens')
+        supervised_positions = (labels[0] != -100).nonzero().flatten()
+        if int(supervised_positions[-1] - supervised_positions[0] + 1) != n:
+            raise ValueError('Recovery requires a contiguous answer span after the masked prompt')
+        mask = batch.get('attention_mask')
+        if mask is not None and (mask.shape != labels.shape or bool(((mask == 0) & (labels != -100)).any())):
+            raise ValueError('Padding must not contribute recovery labels')
+        token_counts.append(n)
+    mlps = mlp_layers(model)
+    original_flags = [(p, p.requires_grad) for p in model.parameters()]
+    original_modes = [(m, m.training) for m in model.modules()]
+    old_cache = getattr(model.config, 'use_cache', None)
+    old_checkpointing = bool(getattr(model, 'is_gradient_checkpointing', False))
+    wrappers, input_hook = [], None
+    seed = config.get('seed', 20261113)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    rng = random.Random(seed)
+    best_snapshot, best_metrics, best_step = None, None, 0
+    history = []
+    completed = 0
+    optimizer = None
+    try:
+        model.requires_grad_(False)
+        model.config.use_cache = False
+        for mlp in mlps:
+            for name in ('gate_proj', 'up_proj', 'down_proj'):
+                adapter = LoRALinear(getattr(mlp, name), rank, alpha)
+                wrappers.append((mlp, name, adapter))
+                setattr(mlp, name, adapter)
+        parameters = [p for _, _, module in wrappers for p in (module.A, module.B)]
+        if config.get('gradient_checkpointing', False) and not old_checkpointing:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+        if bool(getattr(model, 'is_gradient_checkpointing', False)):
+            input_hook = model.get_input_embeddings().register_forward_hook(
+                lambda module, args, output: output.requires_grad_(True))
+        optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=0.0)
+        device = next(model.parameters()).device
+
+        def assess(step):
+            nonlocal best_snapshot, best_metrics, best_step
+            modes = [(module, module.training) for module in model.modules()]
+            flags = [(p, p.requires_grad) for p in model.parameters()]
+            try:
+                with torch.no_grad():
+                    metrics = evaluate_dev(model)
+                score = _metric(metrics)
+            finally:
+                for module, mode in modes:
+                    module.training = mode
+                for p, flag in flags:
+                    p.requires_grad_(flag)
+                model.config.use_cache = False
+            history.append({'step': step, 'dev': metrics})
+            print(f"Recovery step {step}/{steps}: dev {score_name(metrics)} {100 * score[0]:.2f}/100, answer loss {-score[1]:.4f}", flush=True)
+            if best_metrics is None or score > _metric(best_metrics):
+                best_metrics, best_step = metrics, step
+                best_snapshot = [p.detach().cpu().clone() for p in parameters]
+            return metrics
+
+        initial = assess(0)
+        train_losses = []
+        while completed < steps:
+            order = list(range(len(batches)))
+            rng.shuffle(order)
+            for start in range(0, len(order), accumulation):
+                group = order[start:start + accumulation]
+                total_tokens = sum(token_counts[i] for i in group)
+                model.train()
+                optimizer.zero_grad(set_to_none=True)
+                group_loss = 0.0
+                for i in group:
+                    batch = {k: v.to(device) for k, v in batches[i].items()}
+                    with torch.enable_grad():
+                        loss = model(**batch).loss
+                        if not bool(torch.isfinite(loss)):
+                            raise FloatingPointError('Nonfinite recovery loss')
+                        weighted_loss = loss * (token_counts[i] / total_tokens)
+                        weighted_loss.backward()
+                    group_loss += float(loss.detach()) * token_counts[i] / total_tokens
+                torch.nn.utils.clip_grad_norm_(parameters, clip, error_if_nonfinite=True)
+                optimizer.step()
+                # Reduce on device before one host check; per-tensor bool calls
+                # otherwise force hundreds of MPS synchronizations per update.
+                if not bool(torch.stack([torch.isfinite(p).all() for p in parameters]).all()):
+                    raise FloatingPointError('Nonfinite adapter parameter')
+                completed += 1
+                train_losses.append(group_loss)
+                if completed in checkpoints:
+                    assess(completed)
+                if completed == steps:
+                    break
+        with torch.no_grad():
+            for p, best in zip(parameters, best_snapshot):
+                p.copy_(best)
+        # Validate every delta before touching any base weights.
+        for _, _, adapter in wrappers:
+            with torch.no_grad():
+                delta = (adapter.B @ adapter.A) * adapter.scale
+                if not bool(torch.isfinite(adapter.base.weight + delta).all()):
+                    raise FloatingPointError('Nonfinite merged weight')
+        for _, _, adapter in wrappers:
+            adapter.merge()
+        return {'initial_dev': initial, 'best_dev': best_metrics, 'best_step': best_step,
+                'history': history, 'optimizer_steps': completed,
+                'trainable_parameters': sum(p.numel() for p in parameters),
+                'train_losses': train_losses, 'merged': True, 'seed': seed}
+    finally:
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        if input_hook is not None:
+            input_hook.remove()
+        if not old_checkpointing and bool(getattr(model, 'is_gradient_checkpointing', False)):
+            model.gradient_checkpointing_disable()
+        for mlp, name, adapter in wrappers:
+            setattr(mlp, name, adapter.base)
+        for p, flag in original_flags:
+            p.requires_grad_(flag)
+        for module, mode in original_modes:
+            module.training = mode
+        if old_cache is None:
+            if hasattr(model.config, 'use_cache'):
+                delattr(model.config, 'use_cache')
+        else:
+            model.config.use_cache = old_cache

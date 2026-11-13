@@ -1,0 +1,10 @@
+{
+  "device": "cpu",
+  "counts": {"recovery": 8, "calibration": 4, "dev": 4, "test": 4},
+  "targets": [0.05],
+  "sensitivity_examples": 2,
+  "benchmark_examples": 2,
+  "benchmark_repeats": 1,
+  "include_controls": false,
+  "recovery": {"max_steps": 2, "gradient_accumulation": 2, "checkpoints": [1, 2]}
+}

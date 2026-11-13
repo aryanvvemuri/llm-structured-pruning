@@ -1,0 +1,15 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "device": "auto",
+  "dtype": "float32",
+  "cache_dir": ".cache/huggingface/hub",
+  "dataset": "synthetic",
+  "seed": 17,
+  "cpu_threads": 4,
+  "counts": {"calibration": 2, "dev": 3, "test": 3},
+  "max_length": 256,
+  "max_new_tokens": 32,
+  "batch_size": 1,
+  "method": "taylor",
+  "search": {"initial_step": 0.02, "min_step": 8, "max_rounds": 2, "max_drop_pp": 0.0, "loss_tolerance": 0.1, "min_keep_ratio": 0.9}
+}

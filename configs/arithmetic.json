@@ -1,0 +1,5 @@
+{
+  "counts": {"calibration": 32, "dev": 64, "test": 128},
+  "max_new_tokens": 32,
+  "search": {"initial_step": 0.05, "min_step": 8, "max_rounds": 8, "max_drop_pp": 2.0, "loss_tolerance": 0.1, "min_keep_ratio": 0.5}
+}
