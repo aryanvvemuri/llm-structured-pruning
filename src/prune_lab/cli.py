@@ -150,8 +150,9 @@ def run_multi_seed(args):
             pairs = [tuple(item.split(":", 1)) for item in args.pair]
             if any(len(p) != 2 or not all(p) for p in pairs):
                 raise ValueError("--pair expects BASELINE_VARIANT:CANDIDATE_VARIANT")
-        result = multiseed.compare_runs(args.baseline, args.candidate, pairs, args.split, args.paired_seeds,
-                                        args.samples, args.bootstrap_seed)
+        paired = True if args.paired_seeds else False if args.unpaired_seeds else None
+        result = multiseed.compare_runs(args.baseline, args.candidate, pairs, args.split, paired,
+                                        args.samples, args.bootstrap_seed, args.allow_different_schedules)
         output = Path(args.output or Path(args.candidate) / f"compare-vs-{Path(args.baseline).resolve().name}.json")
         write_json(output, result)
         output.with_suffix(".md").write_text(multiseed.render_comparison(result))
@@ -189,8 +190,12 @@ def main(argv=None):
     seeds_compare.add_argument("--pair", action="append", metavar="A_VARIANT:B_VARIANT",
                                help="Variants to compare (default: every variant present in both)")
     seeds_compare.add_argument("--split", choices=["dev", "test"], default="dev")
-    seeds_compare.add_argument("--paired-seeds", action="store_true",
-                               help="Resample seeds jointly by seed value (default: independently per run)")
+    pairing = seeds_compare.add_mutually_exclusive_group()
+    pairing.add_argument("--paired-seeds", action="store_true",
+                         help="Force pairing by seed value (default: paired whenever both seed sets are identical)")
+    pairing.add_argument("--unpaired-seeds", action="store_true", help="Force independent seed resampling per run")
+    seeds_compare.add_argument("--allow-different-schedules", action="store_true",
+                               help="Permit dev-full decisions between runs with different recovery checkpoints/max_steps")
     seeds_compare.add_argument("--output")
     for p in (seeds_run, seeds_aggregate, seeds_compare):
         p.add_argument("--samples", type=int, default=4000, help="Bootstrap resamples")

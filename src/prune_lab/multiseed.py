@@ -26,6 +26,11 @@ EVALUATION_KEYS = ("max_length", "max_new_tokens", "eval_batch_size", "dtype", "
 def evaluation_protocol(config):
     return {key: config.get(key, 1 if key == "eval_batch_size" else None) for key in EVALUATION_KEYS}
 SHARED_FILES = ("baseline.json", "allocation.json")
+
+
+def recovery_schedule(config):
+    recovery = config.get("recovery", {})
+    return {"max_steps": recovery.get("max_steps"), "checkpoints": recovery.get("checkpoints")}
 MIN_SEEDS = 5
 DECISION_NOTE = (
     "Decision rule: a difference is 'confident' only when the hierarchical bootstrap interval AND a seed-level "
@@ -176,7 +181,7 @@ def collect_run(root, split="dev"):
         directories = [root]  # A single ordinary campaign counts as one seed.
     if not directories:
         raise ValueError(f"No seed-* campaign directories under {root}")
-    seeds, incomplete, dataset, subsets, protocol = {}, [], None, set(), None
+    seeds, incomplete, dataset, subsets, protocol, schedules, selection_keys = {}, [], None, set(), None, set(), None
     for directory in directories:
         if not (directory / "selection-lock.json").exists():
             incomplete.append(directory.name)
@@ -206,6 +211,11 @@ def collect_run(root, split="dev"):
         subset_path = directory / "selection-dev.json"
         subset = _read(subset_path) if subset_path.exists() else None
         subsets.add(None if subset is None else (subset["count"], subset["keys_sha256"]))
+        if subset is not None:
+            if len(subset["keys"]) != subset["count"] or len(set(subset["keys"])) != subset["count"]:
+                raise ValueError(f"{directory.name}: selection-dev.json keys do not match its count")
+            selection_keys = sorted(subset["keys"])
+        schedules.add(json.dumps(recovery_schedule(config), sort_keys=True))
         variants = {}
         baseline = selection["baseline"]
         if split == "dev":
@@ -223,14 +233,19 @@ def collect_run(root, split="dev"):
         for name, variant in variants.items():
             if len(variant["examples"]) != expected:
                 raise ValueError(f"{directory.name}/{name}: reported {split} metrics cover {len(variant['examples'])} of {expected} examples")
+            if split == "dev" and subset is not None and not set(subset["keys"]) <= set(variant["examples"]):
+                raise ValueError(f"{directory.name}/{name}: selection-dev.json ids are not all in the reported dev records")
         seeds[seed] = variants
     if not seeds:
         raise ValueError(f"No completed seeds under {root}")
     if len(subsets) > 1:
         raise ValueError(f"Seeds in {root} used different checkpoint-selection dev subsets")
+    if len(schedules) > 1:
+        raise ValueError(f"Seeds in {root} used different recovery schedules")
     subset = next(iter(subsets))
     return {"root": str(root), "split": split, "dataset": dataset, "seeds": seeds, "incomplete": incomplete,
-            "evaluation_protocol": protocol,
+            "evaluation_protocol": protocol, "recovery_schedule": json.loads(next(iter(schedules))),
+            "selection_keys": selection_keys,
             "selection_dev_subset": None if subset is None else {"count": subset[0], "keys_sha256": subset[1]}}
 
 
@@ -445,8 +460,33 @@ def _comparison(label_a, seeds_a, label_b, seeds_b, paired, samples, seed):
     return result
 
 
-def aggregate_run(root, split="dev", samples=4000, seed=17):
-    run = collect_run(root, split)
+def _restrict(run, excluded):
+    """Copy of a collected run without ``excluded`` examples; F1/ROUGE-L means are recomputed."""
+    excluded = set(excluded)
+    seeds = {}
+    for seed, variants in run["seeds"].items():
+        seeds[seed] = {}
+        for name, variant in variants.items():
+            examples = {k: v for k, v in variant["examples"].items() if k not in excluded}
+            if not examples:
+                raise ValueError("No examples remain after removing the selection subset")
+            aggregate = dict(variant["aggregate"])
+            for metric in METRICS:
+                aggregate[metric] = 100 * statistics.fmean(v[metric] for _, v in examples.values())
+            seeds[seed][name] = dict(variant, examples=examples, aggregate=aggregate)
+    return dict(run, seeds=seeds)
+
+
+def _example_sets(run, excluded):
+    """Headline first: dev-holdout when a selection subset exists, otherwise the full split."""
+    count = len(next(iter(next(iter(run["seeds"].values())).values()))["examples"])
+    if run["split"] != "dev" or not excluded:
+        return [(run["split"] if run["split"] == "test" else "dev-full", run, count)]
+    holdout = _restrict(run, excluded)
+    return [("dev-holdout", holdout, count - len(set(excluded))), ("dev-full", run, count)]
+
+
+def _within_run(run, samples, seed):
     variants = _per_variant(run)
     names = list(variants)
     comparisons = []
@@ -463,12 +503,27 @@ def aggregate_run(root, split="dev", samples=4000, seed=17):
                 comparison["seeds_excluded"] = excluded
                 comparison["seeds_excluded_note"] = "Seeds where only one variant completed are left out of this paired comparison."
             comparisons.append(comparison)
+    entries = {name: dict(entry, token_f1_interval=hierarchical_bootstrap(None, per_seed, "token_f1", True, samples, seed))
+               for name, (entry, per_seed) in variants.items()}
+    return entries, comparisons
+
+
+def aggregate_run(root, split="dev", samples=4000, seed=17):
+    run = collect_run(root, split)
+    sets = _example_sets(run, run["selection_keys"])
+    results = {name: (_within_run(view, samples, seed), count) for name, view, count in sets}
+    headline, secondary = sets[0][0], sets[1:]
+    (variants, comparisons), count = results[headline]
     summary = {"root": run["root"], "split": split, "dataset": run["dataset"],
                "seeds": sorted(run["seeds"]), "incomplete_seed_directories": run["incomplete"],
-               "variants": {name: dict(entry, token_f1_interval=hierarchical_bootstrap(None, per_seed, "token_f1", True, samples, seed))
-                            for name, (entry, per_seed) in variants.items()},
-               "comparisons": comparisons, "interval_note": INTERVAL_NOTE, "decision_note": DECISION_NOTE,
-               "selection_dev_subset": run["selection_dev_subset"], "selection_note": _selection_note(run["selection_dev_subset"], run["dataset"]["dev"]["count"]),
+               "example_set": headline, "example_count": count,
+               "variants": variants, "comparisons": comparisons,
+               "secondary": {name: {"example_count": results[name][1], "variants": results[name][0][0],
+                                    "comparisons": results[name][0][1]} for name, _, _ in secondary},
+               "interval_note": INTERVAL_NOTE, "decision_note": DECISION_NOTE,
+               "selection_dev_subset": run["selection_dev_subset"],
+               "selection_note": _selection_note(run["selection_dev_subset"], run["dataset"]["dev"]["count"]),
+               "recovery_schedule": run["recovery_schedule"],
                "within_run_seed_pairing": "Variants from the same seed directory are paired by seed."}
     suffix = "" if split == "dev" else "-test"
     write_json(Path(root) / f"multi-seed-summary{suffix}.json", summary)
@@ -476,13 +531,7 @@ def aggregate_run(root, split="dev", samples=4000, seed=17):
     return summary
 
 
-def compare_runs(baseline_root, candidate_root, pairs=None, split="dev", paired_seeds=False, samples=4000, seed=17):
-    """Compare variants across two multi-seed runs on the same split data (e.g. new method vs main)."""
-    a, b = collect_run(baseline_root, split), collect_run(candidate_root, split)
-    if a["dataset"][split] != b["dataset"][split]:
-        raise ValueError(f"Runs use different {split} data; comparison would be unpaired")
-    if a["evaluation_protocol"] != b["evaluation_protocol"]:
-        raise ValueError(f"Runs use different evaluation settings: {a['evaluation_protocol']} vs {b['evaluation_protocol']}")
+def _cross_run(a, b, pairs, paired_seeds, samples, seed):
     va, vb = _per_variant(a), _per_variant(b)
     pairs = pairs or [(n, n) for n in va if n in vb]
     if not pairs:
@@ -491,23 +540,67 @@ def compare_runs(baseline_root, candidate_root, pairs=None, split="dev", paired_
     for name_a, name_b in pairs:
         if name_a not in va or name_b not in vb:
             raise ValueError(f"Unknown variant pair {name_a}:{name_b}")
-        comparisons.append(_comparison(f"{a['root']}:{name_a}", va[name_a][1], f"{b['root']}:{name_b}", vb[name_b][1],
-                                       paired_seeds, samples, seed))
+        sa, sb = va[name_a][1], vb[name_b][1]
+        paired = set(sa) == set(sb) if paired_seeds is None else paired_seeds
+        comparisons.append(_comparison(f"{a['root']}:{name_a}", sa, f"{b['root']}:{name_b}", sb, paired, samples, seed))
+    return {"baseline": {n: e for n, (e, _) in va.items()}, "candidate": {n: e for n, (e, _) in vb.items()}}, comparisons
+
+
+def compare_runs(baseline_root, candidate_root, pairs=None, split="dev", paired_seeds=None, samples=4000, seed=17,
+                 allow_different_schedules=False):
+    """Compare variants across two multi-seed runs on the same split data (e.g. new method vs main).
+
+    ``paired_seeds=None`` pairs by seed value whenever a pair's seed sets are identical (the
+    documented protocol) and resamples seeds independently otherwise; True/False force it.
+    On dev with a selection subset, the headline uses dev-holdout (examples outside both runs'
+    selection subsets). Dev-full decisions need identical recovery schedules unless allowed.
+    """
+    a, b = collect_run(baseline_root, split), collect_run(candidate_root, split)
+    if a["dataset"][split] != b["dataset"][split]:
+        raise ValueError(f"Runs use different {split} data; comparison would be unpaired")
+    if a["evaluation_protocol"] != b["evaluation_protocol"]:
+        raise ValueError(f"Runs use different evaluation settings: {a['evaluation_protocol']} vs {b['evaluation_protocol']}")
+    excluded = sorted(set(a["selection_keys"] or []) | set(b["selection_keys"] or []))
+    same_schedule = a["recovery_schedule"] == b["recovery_schedule"]
+    sets = [(name, view) for name, view, _ in _example_sets(a, excluded)]
+    sets_b = {name: view for name, view, _ in _example_sets(b, excluded)}
+    withheld = None
+    if split == "dev" and not same_schedule and not allow_different_schedules:
+        if sets[0][0] == "dev-full":
+            raise ValueError("Runs use different recovery schedules (checkpoints/max_steps) and in-training selection used the "
+                             "reported dev examples, so a dev-full decision is biased; pass --allow-different-schedules to override")
+        withheld = "dev-full omitted: recovery schedules differ and selection optimism would differ between runs."
+        sets = [item for item in sets if item[0] != "dev-full"]
+    results = {}
+    for name, view in sets:
+        variants, comparisons = _cross_run(view, sets_b[name], pairs, paired_seeds, samples, seed)
+        results[name] = {"example_count": len(next(iter(next(iter(view["seeds"].values())).values()))["examples"]),
+                         "variants": variants, "comparisons": comparisons}
+    headline = sets[0][0]
+    pairing = ("auto: paired by seed value when seed sets are identical, otherwise independent" if paired_seeds is None
+               else "paired by seed value" if paired_seeds else "independent seed resampling per run")
     return {"baseline_root": a["root"], "candidate_root": b["root"], "split": split,
+            "example_set": headline, "example_count": results[headline]["example_count"],
+            "variants": results[headline]["variants"], "comparisons": results[headline]["comparisons"],
+            "secondary": {name: value for name, value in results.items() if name != headline},
+            "secondary_withheld": withheld,
+            "recovery_schedules": {"baseline": a["recovery_schedule"], "candidate": b["recovery_schedule"],
+                                   "identical": same_schedule},
+            "allow_different_schedules": allow_different_schedules,
             "selection_dev_subsets": {"baseline": a["selection_dev_subset"], "candidate": b["selection_dev_subset"],
-                                      "identical": a["selection_dev_subset"] == b["selection_dev_subset"]},
+                                      "identical": a["selection_dev_subset"] == b["selection_dev_subset"],
+                                      "excluded_from_holdout": len(excluded)},
             "selection_note": _selection_note(b["selection_dev_subset"], b["dataset"]["dev"]["count"]),
-            "seed_pairing": "paired by seed value" if paired_seeds else "independent seed resampling per run",
-            "variants": {"baseline": {n: e for n, (e, _) in va.items()}, "candidate": {n: e for n, (e, _) in vb.items()}},
-            "comparisons": comparisons, "interval_note": INTERVAL_NOTE, "decision_note": DECISION_NOTE}
+            "seed_pairing": pairing, "interval_note": INTERVAL_NOTE, "decision_note": DECISION_NOTE}
 
 
 def _selection_note(subset, dev_count):
     if subset is None:
         return f"In-training checkpoint selection used all {dev_count} dev examples, the same set that is reported."
     return (f"In-training checkpoint selection used a fixed {subset['count']}-example domain-stratified dev subset "
-            f"(keys sha256 {subset['keys_sha256'][:12]}…), which is part of the {dev_count}-example dev set reported here; "
-            "reported dev metrics are full-dev, after-reload evaluations, and the subset makes them slightly optimistic.")
+            f"(keys sha256 {subset['keys_sha256'][:12]}…), which is part of the {dev_count}-example dev set. Headline numbers and "
+            f"decisions use dev-holdout (the {dev_count - subset['count']} dev examples outside it); dev-full is secondary and "
+            "slightly optimistic, by amounts that can differ between methods. Answer loss is only stored for full dev.")
 
 
 def _fmt(value, digits=2):
@@ -542,11 +635,19 @@ def _decision_lines(comparisons):
     return lines
 
 
+def _secondary_lines(result):
+    lines = []
+    for name, value in result.get("secondary", {}).items():
+        lines += ["", f"## Secondary: {name} ({value['example_count']} examples; not used for decisions)", ""]
+        lines += _comparison_rows(value["comparisons"])
+    return lines
+
+
 def render_summary(summary):
     lines = [f"# Multi-seed {summary['split']} summary", "",
              f"Run: `{summary['root']}`. Recovery seeds: {', '.join(map(str, summary['seeds']))}."
              + (f" Incomplete (ignored): {', '.join(summary['incomplete_seed_directories'])}." if summary['incomplete_seed_directories'] else ""),
-             ""] + _decision_lines(summary["comparisons"]) + [
+             "", f"Headline example set: **{summary['example_set']}** ({summary['example_count']} examples).", ""] + _decision_lines(summary["comparisons"]) + [
              "", "## Variants", "",
              "F1 and ROUGE-L are 0–100 word-overlap scores, **not accuracy**. Original Qwen is not retrained, so its sd is 0.", "",
              "| Variant | Parameters | Removed | Seeds | F1 mean ± sd | F1 95% interval | Per-seed F1 | ROUGE-L mean ± sd | Answer loss mean ± sd |",
@@ -560,6 +661,7 @@ def render_summary(summary):
                      f"{_fmt(m['rouge_l']['mean'])} ± {_fmt(m['rouge_l']['sd'])} | "
                      f"{_fmt(m['answer_token_loss']['mean'], 4)} ± {_fmt(m['answer_token_loss']['sd'], 4)} |")
     lines += ["", "## Paired differences", ""] + _comparison_rows(summary["comparisons"])
+    lines += _secondary_lines(summary)
     lines += ["", "## What the interval covers", "", summary["interval_note"], "",
               summary["within_run_seed_pairing"] + " `seeds_only_interval` and `families_only_interval` in the JSON "
               "show each source of variation alone. Accept a change only if a predeclared comparison is 'confident'; "
@@ -570,9 +672,15 @@ def render_summary(summary):
 def render_comparison(result):
     lines = [f"# Cross-run {result['split']} comparison", "",
              f"Baseline (a): `{result['baseline_root']}`. Candidate (b): `{result['candidate_root']}`. "
-             f"Seeds: {result['seed_pairing']}. Examples are paired by id; document families are resampled jointly.", ""]
+             f"Seeds: {result['seed_pairing']}. Examples are paired by id; document families are resampled jointly.", "",
+             f"Headline example set: **{result['example_set']}** ({result['example_count']} examples). Recovery schedules: "
+             f"baseline {json.dumps(result['recovery_schedules']['baseline'])}, candidate {json.dumps(result['recovery_schedules']['candidate'])}"
+             + (" (different schedules explicitly allowed)." if result["allow_different_schedules"] else "."), ""]
     lines += _decision_lines(result["comparisons"]) + ["", "## Differences", ""]
     lines += _comparison_rows(result["comparisons"])
+    lines += _secondary_lines(result)
+    if result.get("secondary_withheld"):
+        lines += ["", result["secondary_withheld"]]
     if not result["selection_dev_subsets"]["identical"]:
         lines += ["", "**Warning:** the two runs used different checkpoint-selection dev subsets."]
     lines += ["", "## What the interval covers", "", result["interval_note"], "", result["selection_note"]]

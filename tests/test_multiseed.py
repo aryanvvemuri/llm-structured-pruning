@@ -107,7 +107,12 @@ def test_multi_seed_cpu_run_discard_aggregate_and_compare(tmp_path, monkeypatch)
     main(['multi-seed', 'compare', '--baseline', str(root), '--candidate', str(root), '--samples', '20',
           '--pair', 'uniform-10:per-layer-01'])
     result = json.loads((root / 'compare-vs-ms.json').read_text())
-    assert result['comparisons'][0]['token_f1']['seed_pairing'] == 'independent'
+    assert result['comparisons'][0]['token_f1']['seed_pairing'] == 'paired'  # identical seed sets pair by default
+    main(['multi-seed', 'compare', '--baseline', str(root), '--candidate', str(root), '--samples', '20',
+          '--unpaired-seeds', '--output', str(tmp_path / 'unpaired.json')])
+    unpaired = json.loads((tmp_path / 'unpaired.json').read_text())
+    assert unpaired['comparisons'][0]['token_f1']['seed_pairing'] == 'independent'
+    assert result['example_set'] == 'dev-full' and result['secondary'] == {}
     same = multiseed.compare_runs(root, root, samples=20, paired_seeds=True)
     assert all(c['token_f1']['interval_95_points'] == [0, 0] for c in same['comparisons'])
     import shutil
@@ -175,3 +180,73 @@ def test_decision_requires_bootstrap_and_seed_t_to_agree():
     welch = multiseed.hierarchical_bootstrap(a, b, paired_seeds=False, samples=100)['seed_t_interval']
     assert welch['method'] == 'Welch t over seeds' and welch['df'] == pytest.approx(2)
     assert multiseed.hierarchical_bootstrap(None, b, samples=20)['decision'] is None
+
+
+
+def write_seed(root, seed, keys, subset=None, schedule=(1, [1]), shift=0.0):
+    """Synthetic completed seed directory with per-example dev records."""
+    from prune_lab import campaign as c
+    directory = root / f'seed-{seed}'
+    directory.mkdir(parents=True)
+    config = {'seed': 1, 'recovery': {'seed': seed, 'max_steps': schedule[0], 'checkpoints': schedule[1]}}
+    (directory / 'config.json').write_text(json.dumps(config))
+    (directory / 'state.json').write_text(json.dumps({'dataset': {'dev': {'count': len(keys), 'sha256': 'd'}}, 'test_started': False}))
+
+    def metrics(scores):
+        return {'token_f1': sum(scores.values()) / len(scores), 'rouge_l': sum(scores.values()) / len(scores),
+                'answer_token_loss': 1.0, 'predictions': [{'key': k, 'group_id': f'g{i % 5}', 'score': v, 'rouge_l': v}
+                                                          for i, (k, v) in enumerate(scores.items())]}
+    base = {k: .3 for k in keys}
+    # The candidate looks much better on the selection subset only: optimism the holdout must remove.
+    cand = {k: (.9 if subset and k in subset else .3 + shift + .01 * (seed % 3)) for k in keys}
+    selection = {'baseline': {'dev': metrics(base), 'parameters': 10},
+                 'candidates': [{'id': 'per-layer-01', 'status': 'complete', 'parameters': 8, 'actual_reduction': .2,
+                                 'checkpoint': 'x', 'dev': metrics(cand)}], 'tiers': []}
+    (directory / 'selection.json').write_text(json.dumps(selection))
+    (directory / 'selection-lock.json').write_text(json.dumps({'sha256': c._fingerprint(selection)}))
+    if subset is not None:
+        (directory / 'selection-dev.json').write_text(json.dumps({'count': len(subset), 'keys_sha256': 'h', 'keys': sorted(subset)}))
+    return directory
+
+
+def test_holdout_headline_excludes_selection_subset(tmp_path):
+    keys = [f'k{i:02d}' for i in range(20)]
+    subset = set(keys[:5])
+    for seed in (1, 2, 3):
+        write_seed(tmp_path / 'run', seed, keys, subset)
+    summary = multiseed.aggregate_run(tmp_path / 'run', samples=50)
+    assert summary['example_set'] == 'dev-holdout' and summary['example_count'] == 15
+    holdout = summary['variants']['per-layer-01']['metrics']['token_f1']['mean']
+    full = summary['secondary']['dev-full']['variants']['per-layer-01']['metrics']['token_f1']['mean']
+    assert holdout == pytest.approx(31) and full == pytest.approx((5 * 90 + 15 * 31) / 20)
+    assert summary['comparisons'][0]['token_f1']['estimate_points'] == pytest.approx(1)
+    assert 'Headline example set: **dev-holdout**' in (tmp_path / 'run' / 'multi-seed-report.md').read_text()
+    bad = write_seed(tmp_path / 'bad', 1, keys, subset)
+    (bad / 'selection-dev.json').write_text(json.dumps({'count': 1, 'keys_sha256': 'h', 'keys': ['missing']}))
+    with pytest.raises(ValueError, match='not all in the reported dev records'):
+        multiseed.collect_run(tmp_path / 'bad')
+
+
+def test_compare_schedules_holdout_and_pairing(tmp_path):
+    keys = [f'k{i:02d}' for i in range(20)]
+    subset = set(keys[:5])
+    for seed in (1, 2, 3):
+        write_seed(tmp_path / 'main', seed, keys, subset)
+        write_seed(tmp_path / 'long', seed, keys, subset, schedule=(2, [1, 2]), shift=.05)
+        write_seed(tmp_path / 'main-nosub', seed, keys)
+        write_seed(tmp_path / 'long-nosub', seed, keys, schedule=(2, [1, 2]), shift=.05)
+    result = multiseed.compare_runs(tmp_path / 'main', tmp_path / 'long', samples=50)
+    assert result['example_set'] == 'dev-holdout' and result['secondary'] == {} and result['secondary_withheld']
+    assert result['recovery_schedules']['candidate'] == {'max_steps': 2, 'checkpoints': [1, 2]}
+    assert result['comparisons'][1]['token_f1']['seed_pairing'] == 'paired'
+    assert result['comparisons'][1]['token_f1']['estimate_points'] == pytest.approx(5)
+    allowed = multiseed.compare_runs(tmp_path / 'main', tmp_path / 'long', samples=50, allow_different_schedules=True)
+    assert allowed['allow_different_schedules'] and set(allowed['secondary']) == {'dev-full'}
+    with pytest.raises(ValueError, match='allow-different-schedules'):
+        multiseed.compare_runs(tmp_path / 'main-nosub', tmp_path / 'long-nosub', samples=20)
+    forced = multiseed.compare_runs(tmp_path / 'main-nosub', tmp_path / 'long-nosub', samples=20,
+                                    paired_seeds=False, allow_different_schedules=True)
+    assert forced['example_set'] == 'dev-full' and forced['comparisons'][0]['token_f1']['seed_pairing'] == 'independent'
+    write_seed(tmp_path / 'fewer', 1, keys, subset)
+    auto = multiseed.compare_runs(tmp_path / 'main', tmp_path / 'fewer', samples=20)
+    assert auto['comparisons'][0]['token_f1']['seed_pairing'] == 'independent'
