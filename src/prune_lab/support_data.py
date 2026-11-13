@@ -239,7 +239,36 @@ def _build_candidates(dialogues, documents, families, tokenizer, max_length, max
     return candidates, dict(filters)
 
 
-def _select(candidates, counts, seed, max_per_dialogue=1):
+def default_family_cap(count):
+    return max(10, math.ceil(count / 20))
+
+
+def _balanced_quotas(count, available):
+    """Water-fill: equal shares, with a short domain's unused share given to the rest."""
+    if sum(available.values()) <= count:
+        return dict(available)
+    level = max(level for level in range(count + 1) if sum(min(a, level) for a in available.values()) <= count)
+    quotas = {d: min(a, level) for d, a in available.items()}
+    for d in sorted(d for d in available if available[d] > level)[:count - sum(quotas.values())]:
+        quotas[d] += 1
+    return quotas
+
+
+def _per_split(value, default, allowed, label):
+    """Normalize a scalar or {split: value} option; unspecified splits keep the v1 default."""
+    mapping = {name: value for name in DEFAULT_COUNTS} if not isinstance(value, dict) else dict(value)
+    if value is None:
+        mapping = {}
+    if set(mapping) - set(DEFAULT_COUNTS) or not all(v is None or allowed(v) for v in mapping.values()):
+        raise ValueError(f'{label} must be a valid value or a mapping from split names to valid values')
+    return {name: default if mapping.get(name) is None else mapping[name] for name in DEFAULT_COUNTS}
+
+
+def _select(candidates, counts, seed, max_per_dialogue=1, family_caps=None, domain_quotas='equal',
+            family_order=None):
+    family_caps = _per_split(family_caps, None, lambda v: type(v) is int and v >= 1, 'family_caps')
+    domain_quotas = _per_split(domain_quotas, 'equal', lambda v: v in ('equal', 'balanced'), 'domain_quotas')
+    family_order = _per_split(family_order, 'size', lambda v: v in ('size', 'random'), 'family_order')
     rng = random.Random(seed)
     candidates = list(candidates)
     rng.shuffle(candidates)
@@ -255,59 +284,84 @@ def _select(candidates, counts, seed, max_per_dialogue=1):
         groups = by_source['test' if name == 'test' else 'other']
         families = list(groups)
         rng.shuffle(families)
-        if name == 'test':
+        if family_order[name] == 'random':
+            pass  # Seeded random family sample: unbiased across family sizes.
+        elif name == 'test':
             families.sort(key=lambda f: (-len({r.dialogue_id for r in groups[f]}) /
                                         max(1, len({r.dialogue_id for r in by_source['other'].get(f, [])})),
                                         -len({r.dialogue_id for r in groups[f]})))
         else:
             families.sort(key=lambda f: -len({r.dialogue_id for r in groups[f]}))
         selected, dialogue_counts, domain_counts = [], Counter(), Counter()
+        selected_prompts = set()
         domains = sorted({r.domain for rows in groups.values() for r in rows})
-        quotas = {domain: counts[name] // len(domains) + int(i < counts[name] % len(domains)) for i, domain in enumerate(domains)}
-        family_cap = max(10, math.ceil(counts[name] / 20))
-        for family in families:
-            if family in used_families:
-                continue
-            added = False
-            family_count = 0
-            for row in groups[family]:
-                if domain_counts[row.domain] >= quotas[row.domain]:
+        family_cap = family_caps[name] or default_family_cap(counts[name])
+        if domain_quotas[name] == 'equal':
+            quotas = {domain: counts[name] // len(domains) + int(i < counts[name] % len(domains)) for i, domain in enumerate(domains)}
+        else:
+            available = Counter()
+            for family, rows in groups.items():
+                if family not in used_families:
+                    rows_per_dialogue = Counter((row.domain, row.dialogue_id) for row in rows)
+                    for domain in domains:
+                        available[domain] += min(family_cap, sum(min(max_per_dialogue, n) for (d, _), n in rows_per_dialogue.items() if d == domain))
+            quotas = _balanced_quotas(counts[name], {d: available[d] for d in domains})
+        family_counts, split_families, rejected = Counter(), set(), set()
+        # 'equal' makes exactly one pass (v1). 'balanced' re-passes after a domain runs short,
+        # handing its unfilled quota to domains that can still supply rows.
+        for _ in range(len(domains) + 2):
+            for family in families:
+                if family in used_families:
                     continue
-                if family_count >= family_cap:
-                    break
-                if row.key in used_keys or dialogue_counts[row.dialogue_id] >= max_per_dialogue:
-                    continue
-                collision = next((field for field in GROUP_FIELDS if getattr(row, field) in signatures[field]
-                                  and signatures[field][getattr(row, field)] != name), None)
-                if collision:
-                    drops[collision] += 1
-                    continue
-                # validate_splits also disallows identical prompts within one split.
-                if any(r.prompt_sha256 == row.prompt_sha256 for r in selected):
-                    drops['within_split_prompt'] += 1
-                    continue
-                representation = _representations(row)
-                near_kind = next((kind for prior in prior_split_representations
-                                  if (kind := _near_duplicate_kind(representation, prior)) is not None), None)
-                if near_kind is not None:
-                    drops['near_duplicate_' + near_kind] += 1
-                    continue
-                selected.append(row)
-                used_keys.add(row.key)
-                dialogue_counts[row.dialogue_id] += 1
-                domain_counts[row.domain] += 1
-                family_count += 1
-                for field in GROUP_FIELDS:
-                    signatures[field][getattr(row, field)] = name
-                added = True
+                for row in groups[family]:
+                    if domain_counts[row.domain] >= quotas[row.domain]:
+                        continue
+                    if family_counts[family] >= family_cap:
+                        break
+                    if row.key in used_keys or row.key in rejected or dialogue_counts[row.dialogue_id] >= max_per_dialogue:
+                        continue
+                    collision = next((field for field in GROUP_FIELDS if getattr(row, field) in signatures[field]
+                                      and signatures[field][getattr(row, field)] != name), None)
+                    if collision:
+                        drops[collision] += 1
+                        rejected.add(row.key)
+                        continue
+                    # validate_splits also disallows identical prompts within one split.
+                    if row.prompt_sha256 in selected_prompts:
+                        drops['within_split_prompt'] += 1
+                        rejected.add(row.key)
+                        continue
+                    representation = _representations(row)
+                    near_kind = next((kind for prior in prior_split_representations
+                                      if (kind := _near_duplicate_kind(representation, prior)) is not None), None)
+                    if near_kind is not None:
+                        drops['near_duplicate_' + near_kind] += 1
+                        rejected.add(row.key)
+                        continue
+                    selected.append(row)
+                    selected_prompts.add(row.prompt_sha256)
+                    used_keys.add(row.key)
+                    dialogue_counts[row.dialogue_id] += 1
+                    domain_counts[row.domain] += 1
+                    family_counts[family] += 1
+                    split_families.add(family)
+                    for field in GROUP_FIELDS:
+                        signatures[field][getattr(row, field)] = name
+                    if len(selected) == counts[name]:
+                        break
                 if len(selected) == counts[name]:
                     break
-            if added:
-                used_families.add(family)
-            if len(selected) == counts[name]:
+            if len(selected) == counts[name] or domain_quotas[name] == 'equal':
                 break
+            revised = _balanced_quotas(counts[name], {d: domain_counts[d] if domain_counts[d] < quotas[d] else available[d]
+                                                      for d in domains})
+            if revised == quotas:
+                break
+            quotas = revised
+        used_families |= split_families
         if len(selected) < counts[name]:
-            raise ValueError(f'Insufficient document-disjoint {name}: {len(selected)}/{counts[name]} with max {max_per_dialogue} example/dialogue')
+            raise ValueError(f'Insufficient document-disjoint {name}: {len(selected)}/{counts[name]} with max {max_per_dialogue} example/dialogue, '
+                             f'family cap {family_cap}; per-domain selected/quota ' + json.dumps({d: [domain_counts[d], quotas[d]] for d in domains}))
         rng.shuffle(selected)
         splits[name] = selected
         prior_split_representations.extend(_representations(row) for row in selected)
@@ -339,7 +393,17 @@ def _near_match_audit(splits, seed=None):
 
 def prepare_support_dataset(archive, output, tokenizer, counts=None, seed=20261113,
                             max_length=512, max_answer_tokens=64, max_history_turns=4,
-                            max_per_dialogue=1, doc_similarity_threshold=.8):
+                            max_per_dialogue=1, doc_similarity_threshold=.8, family_caps=None,
+                            domain_quotas='equal', family_order=None, exclude_dialogue_ids=None,
+                            exclusion_source=None):
+    """Defaults reproduce doc2dial_v1 exactly; optional arguments only add manifest fields when used.
+
+    ``exclude_dialogue_ids`` removes whole conversations (e.g. an already inspected test set)
+    from every split. The next three accept one value or a {split: value} mapping:
+    ``family_caps`` overrides the per-family cap max(10, ceil(count/20)); ``domain_quotas='balanced'``
+    water-fills quotas when a domain cannot supply an equal share; ``family_order='random'`` samples
+    families in seeded random order instead of v1's size-based order (more, smaller held-out families).
+    """
     counts = dict(DEFAULT_COUNTS if counts is None else counts)
     if set(counts) != set(DEFAULT_COUNTS) or any(type(n) is not int or n < 1 for n in counts.values()):
         raise ValueError('Four strictly positive integer split counts required')
@@ -362,7 +426,26 @@ def prepare_support_dataset(archive, output, tokenizer, counts=None, seed=202611
     documents = {domain + ':' + key: doc for domain, docs in doc_data.items() for key, doc in docs.items()}
     families, near_edges = _document_families(documents, doc_similarity_threshold)
     candidates, filters = _build_candidates(dialogues, documents, families, tokenizer, max_length, max_answer_tokens, max_history_turns)
-    splits, collisions = _select(candidates, counts, seed, max_per_dialogue)
+    exclusion = None
+    if exclude_dialogue_ids is not None:
+        if isinstance(exclude_dialogue_ids, (str, bytes)):
+            raise ValueError('exclude_dialogue_ids must be a collection of dialogue ids, not one string')
+        excluded = set(exclude_dialogue_ids)
+        if not excluded or any(not isinstance(x, str) or not x for x in excluded):
+            raise ValueError('exclude_dialogue_ids must be nonempty dialogue id strings')
+        available_dialogues = {row.dialogue_id for row in candidates}
+        removed = [row for row in candidates if row.dialogue_id in excluded]
+        candidates = [row for row in candidates if row.dialogue_id not in excluded]
+        exclusion = {'source': exclusion_source, 'requested_dialogues': len(excluded),
+                     'requested_sha256': hashlib.sha256('\n'.join(sorted(excluded)).encode()).hexdigest(),
+                     'eligible_dialogues_excluded': len(excluded & available_dialogues),
+                     'candidates_excluded': len(removed),
+                     'excluded_source_splits': dict(Counter(row.source_split for row in removed)),
+                     'policy': 'Whole dialogues removed from every split before selection.'}
+    caps = _per_split(family_caps, None, lambda v: type(v) is int and v >= 1, 'family_caps')
+    quotas = _per_split(domain_quotas, 'equal', lambda v: v in ('equal', 'balanced'), 'domain_quotas')
+    orders = _per_split(family_order, 'size', lambda v: v in ('size', 'random'), 'family_order')
+    splits, collisions = _select(candidates, counts, seed, max_per_dialogue, caps, quotas, orders)
     overlaps = validate_support_splits(splits)
     audit = _near_match_audit(splits)
     if audit['matched_pairs']:
@@ -398,6 +481,21 @@ def prepare_support_dataset(archive, output, tokenizer, counts=None, seed=202611
                        'Human-written references can contain errors or unsupported statements; they are not verified factual answers.',
                        'No target or future turn is inserted into dialogue context; document text may naturally overlap the response.',
                        'Lexical grouping/audits cannot rule out paraphrase or semantic overlap; document disjointness changes the official benchmark distribution.']}
+    if exclusion is not None:
+        manifest['dialogue_exclusion'] = exclusion
+    # Non-default options add fields; default (v1) manifests stay byte-identical.
+    if any(caps.values()):
+        manifest['preparation']['per_family_cap_effective'] = {
+            name: caps[name] or default_family_cap(counts[name]) for name in DEFAULT_COUNTS}
+    if set(quotas.values()) != {'equal'}:
+        manifest['preparation']['domain_quotas'] = quotas
+        manifest['preparation']['domain_allocation'] = ('Per split: equal = equal domain quotas, remainder alphabetical; balanced = '
+                                                        'water-fill, equal shares with any share a domain cannot supply (after family caps, '
+                                                        'collisions and earlier splits) given to the other domains')
+    if set(orders.values()) != {'size'}:
+        manifest['preparation']['family_order'] = orders
+        manifest['preparation']['family_order_note'] = ('size = v1 (test: highest test/train dialogue ratio first; others: largest family first); '
+                                                        'random = seeded random family order')
     output.mkdir(parents=True, exist_ok=True)
     for name, rows in splits.items():
         write_support_jsonl(output / f'{name}.jsonl', rows)

@@ -59,6 +59,9 @@ def run(args):
             config["device"] = args.device
         run_campaign(config, args.output, args.stage)
         return
+    if args.command == "multi-seed":
+        run_multi_seed(args)
+        return
     if args.command == "report":
         result = json.loads(Path(args.result).read_text())
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +125,39 @@ def run(args):
         print(args.output)
 
 
+def run_multi_seed(args):
+    from . import multiseed
+    if args.action == "run":
+        from .campaign import read_campaign_config
+        config = read_campaign_config(args.config)
+        if args.model:
+            config["model"] = args.model
+        if args.device:
+            config["device"] = args.device
+        if args.num_seeds < 1:
+            raise ValueError("--num-seeds must be positive")
+        seeds = args.seeds or [config["recovery"]["seed"] + i for i in range(args.num_seeds)]
+        multiseed.run_seeds(config, args.output, seeds, open_test=args.open_test,
+                            discard_checkpoints=args.discard_checkpoints)
+        summary = multiseed.aggregate_run(args.output, "dev", args.samples, args.bootstrap_seed)
+        print(f"Multi-seed dev summary: {Path(args.output) / 'multi-seed-report.md'} ({len(summary['seeds'])} seeds)")
+    elif args.action == "aggregate":
+        multiseed.aggregate_run(args.run, args.split, args.samples, args.bootstrap_seed)
+        print(Path(args.run) / ("multi-seed-report.md" if args.split == "dev" else "multi-seed-report-test.md"))
+    else:
+        pairs = None
+        if args.pair:
+            pairs = [tuple(item.split(":", 1)) for item in args.pair]
+            if any(len(p) != 2 or not all(p) for p in pairs):
+                raise ValueError("--pair expects BASELINE_VARIANT:CANDIDATE_VARIANT")
+        result = multiseed.compare_runs(args.baseline, args.candidate, pairs, args.split, args.paired_seeds,
+                                        args.samples, args.bootstrap_seed)
+        output = Path(args.output or Path(args.candidate) / f"compare-vs-{Path(args.baseline).resolve().name}.json")
+        write_json(output, result)
+        output.with_suffix(".md").write_text(multiseed.render_comparison(result))
+        print(output.with_suffix(".md"))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -131,6 +167,34 @@ def main(argv=None):
     campaign.add_argument("--device", choices=["auto", "cpu", "mps"])
     campaign.add_argument("--output", default="runs/campaign-v2")
     campaign.add_argument("--stage", choices=["preflight", "fit", "finalize", "benchmark", "all"], default="all")
+    multi = sub.add_parser("multi-seed", help="Repeat recovery over seeds (dev only by default) and aggregate with a seed x family bootstrap")
+    actions = multi.add_subparsers(dest="action", required=True)
+    seeds_run = actions.add_parser("run", help="Run preflight+fit for every recovery seed into OUTPUT/seed-<s>/")
+    seeds_run.add_argument("--config", required=True)
+    seeds_run.add_argument("--output", required=True)
+    seeds_run.add_argument("--model")
+    seeds_run.add_argument("--device", choices=["auto", "cpu", "mps"])
+    chosen = seeds_run.add_mutually_exclusive_group()
+    chosen.add_argument("--seeds", type=int, nargs="+", help="Explicit recovery seeds")
+    chosen.add_argument("--num-seeds", type=int, default=3, help="Use config recovery.seed + 0..N-1")
+    seeds_run.add_argument("--open-test", action="store_true", help="Also run finalize (final TEST evaluation) per seed")
+    seeds_run.add_argument("--discard-checkpoints", action="store_true",
+                           help="Delete each seed's exported *.safetensors after its evaluations are saved")
+    seeds_aggregate = actions.add_parser("aggregate", help="Write multi-seed-summary.json and multi-seed-report.md")
+    seeds_aggregate.add_argument("--run", required=True)
+    seeds_aggregate.add_argument("--split", choices=["dev", "test"], default="dev")
+    seeds_compare = actions.add_parser("compare", help="Paired difference of variants across two runs (b minus a)")
+    seeds_compare.add_argument("--baseline", required=True, help="Run directory a, e.g. main")
+    seeds_compare.add_argument("--candidate", required=True, help="Run directory b, e.g. the new method")
+    seeds_compare.add_argument("--pair", action="append", metavar="A_VARIANT:B_VARIANT",
+                               help="Variants to compare (default: every variant present in both)")
+    seeds_compare.add_argument("--split", choices=["dev", "test"], default="dev")
+    seeds_compare.add_argument("--paired-seeds", action="store_true",
+                               help="Resample seeds jointly by seed value (default: independently per run)")
+    seeds_compare.add_argument("--output")
+    for p in (seeds_run, seeds_aggregate, seeds_compare):
+        p.add_argument("--samples", type=int, default=4000, help="Bootstrap resamples")
+        p.add_argument("--bootstrap-seed", type=int, default=17)
     for command in ("doctor", "evaluate", "score", "search", "export", "report"):
         p = sub.add_parser(command)
         if command != "report":
