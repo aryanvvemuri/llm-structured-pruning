@@ -253,6 +253,9 @@ def preflight(config, output, splits):
     try:
         print("Preflight: measuring two recovery steps on the selected device", flush=True)
         recovery = dict(config["recovery"], max_steps=2, checkpoints=[2])
+        if "warmup_steps" in recovery:
+            # Two-update timing probe: keep the configured schedule valid.
+            recovery["warmup_steps"] = min(recovery["warmup_steps"], 1)
         n = 2 * recovery["gradient_accumulation"]
         batches = make_batches(splits["recovery"][:n], tokenizer, config["max_length"])
         device = next(model.parameters()).device
