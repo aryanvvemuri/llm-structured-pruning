@@ -1,5 +1,25 @@
 # Implementation and local validation results
 
+## Evaluation power: v2 data and 5-seed baseline (November 13, 2026)
+
+Added a larger Doc2Dial build (`datasets/doc2dial_v2`: 1,800 recovery / 150 calibration / 600 development / 224 test), a multi-seed runner, batched generation, and a two-interval decision rule. The final test split is smaller than v1's (the official test partition has 656 eligible dialogues; 224 remain after excluding the inspected v1 test and balancing domains) and stays sealed. Decisions use **dev-holdout**: the 450 development examples outside the 150-example checkpoint-selection subset.
+
+Five recovery seeds (20261114–20261118), Qwen2.5-0.5B-Instruct, float32, `mps:0`, 50 optimizer updates, `eval_batch_size` 16 (replies byte-identical to batch one on 96 MPS and 24 CPU examples). Token F1 is a 0–100 word-overlap score, not accuracy.
+
+| Variant | Removed | Mean F1 | Seed sd | Per-seed F1 | Δ vs recovery only | Decision |
+| --- | ---: | ---: | ---: | --- | ---: | --- |
+| Original Qwen | 0% | 22.05 | — | — | −26.67 | confident |
+| Recovery only | 0% | 48.72 | 3.34 | 43.22, 49.01, 48.62, 51.30, 51.47 | — | — |
+| Uniform 10% | 10.03% | 47.05 | 3.23 | 42.88, 46.05, 47.65, 51.83, 46.86 | −1.67 | not established |
+| Per-layer 10% | 9.99% | 46.64 | 2.11 | 45.09, 45.12, 45.51, 49.95, 47.55 | −2.08 | not established |
+| Per-layer 20% | 19.99% | 46.10 | 2.39 | 43.26, 45.62, 46.52, 49.81, 45.29 | −2.63 | not established |
+
+Per-layer 10% minus uniform 10% is −0.41 (bootstrap [−2.38, +1.67], seed t [−2.69, +1.87]): no advantage for the allocator is established. A difference is "confident" only when a hierarchical bootstrap over seeds and document families and a seed-level Student-t interval both exclude zero with the same sign.
+
+**Seed variance dominates.** The same variant moves 2–3.3 F1 points between seeds, mostly as a whole-seed shift shared across variants (between-variant correlation of per-seed means 0.68–0.99). Each seed trains on a different 200 of the 1,800 recovery examples, and the selected checkpoint alternated between update 25 and 50 (10 of 20 cells each). The v1 single-seed 7.5-point loss for 20% pruning is not reproduced on average here. With this variance, a paired-by-seed comparison of two runs detects a true 4-point difference about 80% of the time and a 2-point difference about 33% of the time.
+
+An independent audit recomputed all 15,000 per-example F1/ROUGE-L values (zero mismatches), every mean, difference, interval and decision, parameter counts, mask identity across seeds, 150/150 merge-check agreement in all 20 cells, and confirmed no test-split evaluation exists. Independent tests: **222 passed, 1 expected failure** (documented: one v2 test prompt equals a v1 test prompt). Artifacts: `runs/support-v2-main/multi-seed-summary.json`, `multi-seed-report.md`; checkpoints were deleted after evaluation, per-example records retained.
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.
