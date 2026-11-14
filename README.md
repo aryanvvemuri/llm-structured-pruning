@@ -186,6 +186,24 @@ HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab quantize --source runs/support-v2
 
 **Vocabulary trimming (improvement 6) was rejected.** Trimming the embedding to the 7,764 tokens of the training splits matched 20% MLP pruning (+0.03 F1, not established). It cost 1.57 F1 against the untrimmed model, because replies copy document words whose tokens were removed. See RESULTS.md and branch `experiment/6-vocabulary`.
 
+### Improvement 6: vocabulary trimming (opt-in, under evaluation)
+
+See `plans/improvement-6-vocabulary.md`. `prune-lab trim-vocab` keeps only the token ids seen in the recovery and calibration splits, plus special tokens, EOS/pad ids and all 256 byte tokens. It slices the tied embedding/output rows of a finished export and evaluates it on dev through `evaluate_support`, using a wrapper tokenizer. That wrapper splits removed tokens into their BPE merge pieces, so text round-trips exactly; the trimmed model cannot emit a removed token.
+
+On the real tokenizer and v2 data, 7,764 of 151,936 rows are kept:
+- `vocab-unpruned` has 364,854,656 parameters (26.15% removed), fewer than `uniform-20`'s 394,942,336;
+- `vocab-uniform-20` has 265,764,224 (46.2% removed).
+
+On dev-holdout, 1.6% of prompt tokens need the fallback (72% of examples have at least one such token), and 2.6% of reference tokens cannot be emitted as single tokens.
+
+Fallback re-splitting pushes 2 dev examples past `max_length` 512. Evaluation raises the loss-pass limit just enough and records it; nothing is truncated and `max_new_tokens` is unchanged. A trimmed model's answer-token loss is normalized over the kept vocabulary only, so it is not comparable with untrimmed models.
+
+```sh
+HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab trim-vocab --source runs/support-v2-allocator --output runs/support-v2-vocab \
+  --variants unpruned-recovery uniform-20
+.venv/bin/python -m prune_lab multi-seed aggregate --run runs/support-v2-vocab
+```
+
 ## Original uniform pruning experiment
 
 ```sh

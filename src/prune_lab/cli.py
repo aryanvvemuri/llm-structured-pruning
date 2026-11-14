@@ -68,6 +68,11 @@ def run(args):
                                      "max_abs_difference": args.max_logit_difference})
         print(f"Quantized {len(summary)} seed(s) into {args.output}; aggregate with: prune-lab multi-seed aggregate --run {args.output}")
         return
+    if args.command == "trim-vocab":
+        from .vocab import trim_run
+        summary = trim_run(args.source, args.output, args.variants, args.seeds, args.check_prompts)
+        print(f"Trimmed {len(summary)} seed(s) into {args.output}; aggregate with: prune-lab multi-seed aggregate --run {args.output}")
+        return
     if args.command == "multi-seed":
         run_multi_seed(args)
         return
@@ -209,6 +214,12 @@ def main(argv=None):
                           help="Logit gate: next-token argmax must agree only where the reference top-2 margin exceeds this")
     quantize.add_argument("--min-position-agreement", type=_bounded_float(0.0, 1.0, "a number in (0, 1]", open_low=True), default=0.97, help="Logit gate: pooled position argmax agreement")
     quantize.add_argument("--max-logit-difference", type=_bounded_float(0.0, float("inf"), "a finite positive number", open_low=True), default=2.0, help="Logit gate: max |logit difference|")
+    trim = sub.add_parser("trim-vocab", help="Trim unused vocabulary rows of saved exports and evaluate them on dev")
+    trim.add_argument("--source", required=True, help="Multi-seed run whose seed-*/candidates/<id>/checkpoint exports are kept")
+    trim.add_argument("--output", required=True)
+    trim.add_argument("--variants", nargs="+", required=True)
+    trim.add_argument("--seeds", type=int, nargs="+")
+    trim.add_argument("--check-prompts", type=int, default=4, help="Calibration prompts for the logit exactness check")
     multi = sub.add_parser("multi-seed", help="Repeat recovery over seeds (dev only by default) and aggregate with a seed x family bootstrap")
     actions = multi.add_subparsers(dest="action", required=True)
     seeds_run = actions.add_parser("run", help="Run preflight+fit for every recovery seed into OUTPUT/seed-<s>/")
