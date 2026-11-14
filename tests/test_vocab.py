@@ -145,3 +145,14 @@ def test_trim_run_assembles_records_for_aggregation(tmp_path, monkeypatch):
     assert {'vocab-unpruned', 'vocab-uniform-10', 'unpruned-recovery', 'uniform-10'} <= set(summary['variants'])
     with pytest.raises(ValueError, match='per-layer-99'):
         vocab.trim_run(tmp_path / 'runs' / 'ms', output, ['per-layer-99'])
+    real = vocab.logit_check
+    monkeypatch.setattr(vocab, 'logit_check', lambda *a, **k: dict(real(*a, **k), passed=False))
+    failing = tmp_path / 'runs' / 'vocab-failing'
+    with pytest.raises(ValueError, match='seed-5/vocab-unpruned.*seed-5/vocab-uniform-10'):
+        vocab.trim_run(tmp_path / 'runs' / 'ms', failing, ['unpruned-recovery', 'uniform-10'], check_prompts=1)
+    assert (failing / 'seed-5' / 'vocab-uniform-10' / 'result.json').exists()  # other variants still finished
+    monkeypatch.setattr(vocab, 'trim_export', lambda *a, **k: pytest.fail('resume must not redo work'))
+    with pytest.raises(ValueError, match='logit exactness'):  # remembered on resume
+        vocab.trim_run(tmp_path / 'runs' / 'ms', failing, ['unpruned-recovery', 'uniform-10'], check_prompts=1)
+    assert json.loads((failing / 'trim-vocab-run.json').read_text())['logit_check_failures'] == [
+        'seed-5/vocab-unpruned', 'seed-5/vocab-uniform-10']

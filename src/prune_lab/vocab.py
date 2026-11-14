@@ -325,7 +325,7 @@ def trim_run(source, output, variants, seeds=None, check_prompts=4):
     if missing:
         raise ValueError(f"Variants without a complete export record: {missing}")
     output = Path(output)
-    summary = []
+    summary, failures = [], []
     for seed_dir in directories:
         selection = _selection(seed_dir)
         config = read_campaign_config(seed_dir / "config.json")
@@ -347,7 +347,10 @@ def trim_run(source, output, variants, seeds=None, check_prompts=4):
             if result_path.exists() and json.loads(result_path.read_text()).get("source_checkpoint_sha256") != identity:
                 shutil.rmtree(directory)
             if result_path.exists():
-                candidates.append(json.loads(result_path.read_text()))
+                done = json.loads(result_path.read_text())
+                if done.get("logit_check") and not done["logit_check"]["passed"]:
+                    failures.append(f"{seed_dir.name}/{name}")
+                candidates.append(done)
                 continue
             print(f"Trim vocabulary {seed_dir.name}/{variant} -> {name}", flush=True)
             if (directory / "export").exists():
@@ -358,6 +361,10 @@ def trim_run(source, output, variants, seeds=None, check_prompts=4):
             kept, provenance = build_kept_set(tokenizer, {"recovery": splits["recovery"], "calibration": splits["calibration"]})
             trimmed = trim_export(export, directory / "export", kept, {"kept_set": provenance})
             check = logit_check(export, directory / "export", splits["calibration"][:check_prompts]) if check_prompts else None
+            if check is not None and not check["passed"]:
+                # Recorded, the remaining variants/seeds still run, and the command fails at the end.
+                failures.append(f"{seed_dir.name}/{name}")
+                print(f"WARNING: {name}: trimmed logits are not bit-identical to the original on kept tokens", flush=True)
             statistics = fallback_statistics(tokenizer, kept, splits["dev"])
             model, wrapped = load_trimmed(directory / "export", config["device"], config["dtype"])
             # Fallback re-splits can lengthen a few prompts/replies past max_length, which only guards the
@@ -377,7 +384,10 @@ def trim_run(source, output, variants, seeds=None, check_prompts=4):
                       "actual_reduction": 1 - trimmed["parameters_after"] / selection["baseline"]["parameters"],
                       "source_parameters": record["parameters"], "trim": trimmed, "kept_set": provenance,
                       "logit_check": check, "dev_fallback": statistics,
-                      "runtime_fallback_tokens": wrapped.fallback_tokens, "evaluation_max_length": eval_config["max_length"],
+                      "diagnostic_fallback_encodes": wrapped.fallback_tokens,
+                      "diagnostic_fallback_note": "Counts removed tokens split during every encode call of the evaluation "
+                                                  "(prompts encoded more than once are counted more than once); use "
+                                                  "dev_fallback for per-example statistics.", "evaluation_max_length": eval_config["max_length"],
                       "dev_examples_over_config_max_length": sum(
                           len(prompt_ids(wrapped, ex.prompt)) + len(wrapped.encode(ex.answer, add_special_tokens=False)) + 1
                           > config["max_length"] for ex in splits["dev"]),
@@ -397,5 +407,8 @@ def trim_run(source, output, variants, seeds=None, check_prompts=4):
         write_json(target / "selection.json", assembled)
         write_json(target / "selection-lock.json", {"sha256": _fingerprint(assembled)})
         summary.append({"seed_dir": str(target), "candidates": [c["id"] for c in candidates]})
-    write_json(output / "trim-vocab-run.json", {"source": str(Path(source).resolve()), "variants": variants, "seeds": summary})
+    write_json(output / "trim-vocab-run.json", {"source": str(Path(source).resolve()), "variants": variants, "seeds": summary,
+                                                "logit_check_failures": failures})
+    if failures:
+        raise ValueError(f"Vocabulary-trim logit exactness check failed for {failures}; all other results were written")
     return summary

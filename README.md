@@ -196,7 +196,7 @@ On the real tokenizer and v2 data, 7,764 of 151,936 rows are kept:
 
 On dev-holdout, 1.6% of prompt tokens need the fallback (72% of examples have at least one such token), and 2.6% of reference tokens cannot be emitted as single tokens.
 
-Fallback re-splitting pushes 2 dev examples past `max_length` 512. Evaluation raises the loss-pass limit just enough and records it; nothing is truncated and `max_new_tokens` is unchanged. A trimmed model's answer-token loss is normalized over the kept vocabulary only, so it is not comparable with untrimmed models.
+Fallback re-splitting pushes 2 dev examples past `max_length` 512. Evaluation raises the loss-pass limit just enough and records it; nothing is truncated and `max_new_tokens` is unchanged. A trimmed model's answer-token loss is normalized over the kept vocabulary only, so it is not comparable with untrimmed models. A failed logit exactness check is recorded, the other variants and seeds still finish, and the command then exits non-zero listing the failures; resume re-reports them. `diagnostic_fallback_encodes` counts splits over every encode call (diagnostic only); `dev_fallback` holds the per-example statistics.
 
 ```sh
 HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab trim-vocab --source runs/support-v2-allocator --output runs/support-v2-vocab \

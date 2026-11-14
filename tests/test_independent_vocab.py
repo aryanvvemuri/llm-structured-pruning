@@ -499,9 +499,6 @@ def test_hash_missing_variant_and_stale_resume(source_run, tmp_path, monkeypatch
         vocab.trim_run(source_run, tmp_path / 'c', ['uniform-20'], seeds=[5])
 
 
-@pytest.mark.xfail(strict=True, reason='Medium: the plan calls the logit exactness check "required", but trim_run only '
-                   'records a failed check in result.json and finishes normally (no warning, no non-zero exit), so a '
-                   'broken trim can be aggregated and compared silently.')
 def test_failed_exactness_check_is_not_silent(source_run, tmp_path, monkeypatch):
     real = vocab.logit_check
     monkeypatch.setattr(vocab, 'logit_check', lambda *a, **k: dict(real(*a, **k), passed=False))
