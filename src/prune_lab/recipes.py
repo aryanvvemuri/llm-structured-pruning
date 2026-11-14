@@ -65,8 +65,17 @@ def validate_distillation(recovery):
     return float(alpha), float(temperature)
 
 
+def validate_checkpoints(recovery):
+    """Explicit checkpoints must lie within max_steps; otherwise they would silently never be assessed."""
+    steps, checkpoints = recovery.get('max_steps', 200), recovery.get('checkpoints')
+    if checkpoints is not None and type(steps) is int and any(
+            type(v) is int and v > steps for v in checkpoints):
+        raise ValueError(f'recovery checkpoints {checkpoints} exceed max_steps {steps}')
+
+
 def validate_recipe(recovery):
     """Config-time validation of all opt-in recovery recipe keys."""
+    validate_checkpoints(recovery)
     validate_lora_targets(recovery)
     validate_schedule(recovery)
     validate_distillation(recovery)

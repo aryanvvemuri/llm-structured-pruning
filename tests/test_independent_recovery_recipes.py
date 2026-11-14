@@ -202,8 +202,6 @@ def test_distillation_requires_unpruned_control():
         campaign.validate_config(config)
 
 
-@pytest.mark.xfail(strict=True, reason='Doubtful (pre-existing): a checkpoint beyond max_steps is accepted and '
-                   'silently never assessed, yet it is listed in the recorded recipe checkpoints.')
 def test_checkpoint_beyond_max_steps_rejected():
     with pytest.raises(ValueError):
         recover_model(tiny(), batches(), Rising(), base_cfg(checkpoints=[3, 6, 9]))

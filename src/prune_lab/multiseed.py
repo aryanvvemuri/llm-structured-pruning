@@ -187,6 +187,7 @@ def collect_run(root, split="dev"):
     if not directories:
         raise ValueError(f"No seed-* campaign directories under {root}")
     seeds, incomplete, dataset, subsets, protocol, schedules, selection_keys = {}, [], None, set(), None, set(), None
+    recipes = set()
     for directory in directories:
         if not (directory / "selection-lock.json").exists():
             incomplete.append(directory.name)
@@ -221,7 +222,7 @@ def collect_run(root, split="dev"):
                 raise ValueError(f"{directory.name}: selection-dev.json keys do not match its count")
             selection_keys = sorted(subset["keys"])
         schedules.add(json.dumps(recovery_schedule(config), sort_keys=True))
-        recipe = recovery_recipe(config)
+        recipes.add(json.dumps(recovery_recipe(config), sort_keys=True))
         variants = {}
         baseline = selection["baseline"]
         if split == "dev":
@@ -248,10 +249,12 @@ def collect_run(root, split="dev"):
         raise ValueError(f"Seeds in {root} used different checkpoint-selection dev subsets")
     if len(schedules) > 1:
         raise ValueError(f"Seeds in {root} used different recovery schedules")
+    if len(recipes) > 1:
+        raise ValueError(f"Seeds in {root} used different recovery recipes (schedule, distillation, adapter targets, ...)")
     subset = next(iter(subsets))
     return {"root": str(root), "split": split, "dataset": dataset, "seeds": seeds, "incomplete": incomplete,
             "evaluation_protocol": protocol, "recovery_schedule": json.loads(next(iter(schedules))),
-            "recovery_recipe": recipe,
+            "recovery_recipe": json.loads(next(iter(recipes))),
             "selection_keys": selection_keys,
             "selection_dev_subset": None if subset is None else {"count": subset[0], "keys_sha256": subset[1]}}
 

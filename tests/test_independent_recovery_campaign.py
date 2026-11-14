@@ -278,9 +278,6 @@ def test_main_reference_still_compares_against_a_new_recipe(tmp_path):
 
 
 @needs_main
-@pytest.mark.xfail(strict=True, reason='BUG (low): collect_run checks max_steps/checkpoints across seeds but not the '
-                   'rest of the recovery recipe; seeds trained with different schedules/distillation/adapter targets '
-                   'are aggregated together and the run reports only the last seed\'s recipe.')
 def test_mixed_recipes_within_one_run_are_refused(tmp_path):
     mixed = tmp_path / 'mixed'
 

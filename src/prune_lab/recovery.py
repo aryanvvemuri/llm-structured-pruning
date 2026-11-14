@@ -82,6 +82,8 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
         raise ValueError('checkpoints must be positive integer optimizer steps')
     if any(not math.isfinite(v) or v <= 0 for v in (alpha, lr, clip)):
         raise ValueError('alpha, learning_rate and max_grad_norm must be positive and finite')
+    from .recipes import validate_checkpoints
+    validate_checkpoints(config)
     schedule, warmup, min_ratio = validate_schedule(config)
     from .recipes import validate_distillation  # 2b; kept local so components stay separable
     distill = validate_distillation(config)
