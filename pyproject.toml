@@ -12,6 +12,8 @@ dependencies = ["torch>=2.2", "transformers>=4.45,<5", "accelerate>=0.34", "safe
 [project.optional-dependencies]
 gsm8k = ["datasets>=2.20"]
 test = ["pytest>=8"]
+# MLX quantization baselines (improvement 4). mlx-lm >= 0.30 requires transformers 5; this project pins 4.x.
+quantize = ["mlx-lm==0.29.1"]
 
 [project.scripts]
 prune-lab = "prune_lab.cli:main"

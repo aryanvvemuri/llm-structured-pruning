@@ -59,6 +59,12 @@ def run(args):
             config["device"] = args.device
         run_campaign(config, args.output, args.stage)
         return
+    if args.command == "quantize":
+        from .quantize import quantize_run
+        summary = quantize_run(args.source, args.output, args.variants, args.precisions, args.seeds,
+                               args.check_prompts, args.speed_examples, args.speed_repeats, args.discard_models)
+        print(f"Quantized {len(summary)} seed(s) into {args.output}; aggregate with: prune-lab multi-seed aggregate --run {args.output}")
+        return
     if args.command == "multi-seed":
         run_multi_seed(args)
         return
@@ -168,6 +174,16 @@ def main(argv=None):
     campaign.add_argument("--device", choices=["auto", "cpu", "mps"])
     campaign.add_argument("--output", default="runs/campaign-v2")
     campaign.add_argument("--stage", choices=["preflight", "fit", "finalize", "benchmark", "all"], default="all")
+    quantize = sub.add_parser("quantize", help="Convert saved exports to MLX fp16/8-bit/4-bit and evaluate them on dev (needs mlx-lm)")
+    quantize.add_argument("--source", required=True, help="Multi-seed run whose seed-*/candidates/<id>/checkpoint exports are kept")
+    quantize.add_argument("--output", required=True)
+    quantize.add_argument("--variants", nargs="+", required=True)
+    quantize.add_argument("--precisions", nargs="+", default=["fp16", "8bit", "4bit"], choices=["fp32", "fp16", "8bit", "4bit"])
+    quantize.add_argument("--seeds", type=int, nargs="+")
+    quantize.add_argument("--check-prompts", type=int, default=4, help="Calibration prompts for the MLX-vs-PyTorch logit check")
+    quantize.add_argument("--speed-examples", type=int, default=32)
+    quantize.add_argument("--speed-repeats", type=int, default=3)
+    quantize.add_argument("--discard-models", action="store_true", help="Delete converted MLX weights after measuring them")
     multi = sub.add_parser("multi-seed", help="Repeat recovery over seeds (dev only by default) and aggregate with a seed x family bootstrap")
     actions = multi.add_subparsers(dest="action", required=True)
     seeds_run = actions.add_parser("run", help="Run preflight+fit for every recovery seed into OUTPUT/seed-<s>/")

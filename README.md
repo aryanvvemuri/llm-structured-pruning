@@ -166,6 +166,22 @@ See `plans/improvement-2-recovery.md`. Every option lives under `recovery` and i
 - **Recorded recipe:** each candidate record stores `recovery.recipe`, the rate of every update (`learning_rates`), the rate in force at each assessed checkpoint, and `training_seconds`/`assessment_seconds`. `multi-seed compare` records both runs' recipes.
 - **Per-example losses** (`store_example_losses: true`, on in the improvement-2 configs): dev records gain per-example `answer_token_loss`/`answer_tokens`, so loss can be bootstrapped later. Nothing else in the record changes.
 
+### Improvement 4: 4-bit quantization baselines (MLX, optional)
+
+See `plans/improvement-4-quantization.md`. `prune-lab quantize` needs the optional `mlx-lm` package. Install it with `uv pip install --python .venv/bin/python 'mlx-lm==0.29.1'`; newer mlx-lm requires transformers 5. `prune_lab` still imports without it.
+
+- **Conversion:** float32 exports become MLX `fp16`, `8bit` or `4bit` (mlx-lm affine group quantization, group size 64). Per-layer MLP widths come from `prune_lab_layer_widths`.
+- **Logit check:** the converted model's logits are compared with the PyTorch export on calibration prompts.
+- **Evaluation:** dev is evaluated with the PyTorch path's prompt template, greedy decoding, `max_new_tokens`, EOS ids and repetition penalty, and its scoring code. Weight bytes, MLX peak memory and tokens/s (32 dev prompts, 3 repeats, after a warm-up) are recorded.
+- **Output:** each `<output>/seed-<s>/` is campaign-shaped. Candidates are `<variant>-<precision>` plus the source records as `<variant>-pytorch`, so `prune-lab multi-seed aggregate --run <output>` reports everything on dev-holdout.
+- **Limits:** MLX speed is only comparable with MLX speed. The test split is never read.
+
+```sh
+HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab quantize --source runs/support-v2-allocator --output runs/support-v2-quant \
+  --variants unpruned-recovery uniform-20 --precisions fp16 8bit 4bit
+.venv/bin/python -m prune_lab multi-seed aggregate --run runs/support-v2-quant
+```
+
 ## Original uniform pruning experiment
 
 ```sh
