@@ -160,6 +160,16 @@ See `plans/improvement-2-recovery.md`. Every option lives under `recovery` and i
 - **Recorded recipe:** each candidate record stores `recovery.recipe`, the rate of every update (`learning_rates`), the rate in force at each assessed checkpoint, and `training_seconds`/`assessment_seconds`. `multi-seed compare` records both runs' recipes.
 - **Per-example losses** (`store_example_losses: true`, on in the improvement-2 configs): dev records gain per-example `answer_token_loss`/`answer_tokens`, so loss can be bootstrapped later. Nothing else in the record changes.
 
+### Improvement 1 allocators (opt-in, under evaluation)
+
+See `plans/improvement-1-allocator.md`. Without an `allocation` key the legacy allocator and today's candidates are unchanged.
+- `allocation: {"methods": [...]}` (or `{"method": ...}`) chooses allocators. `"legacy"` produces `per-layer-NN`.
+- `"curve"` produces `curve-<pct>` (1a). It probes each layer at 10/25/50% removal on all calibration examples, clamps negative increases to 0, and takes the running maximum. It then greedily removes the 64-neuron group with the smallest marginal loss increase per parameter, breaking ties toward the least-pruned layer, with at most 50% removed per layer.
+- `"global-standardized"` produces `global-std-<pct>` (1b, FLAP-style). Taylor scores are standardized within each layer, and a layer's next group is ranked by its mean standardized score, with the same 50% cap and budget rule.
+- `uniform_per_target: true` adds `uniform-<pct>` for every target, and `train_candidates` restricts training to the listed names.
+- `allocation.json` records the raw probes, processed curves, per-candidate removal fractions and calibration loss right after pruning.
+- `configs/support-v2-allocator.json` trains `unpruned-recovery`, `uniform-20`, `per-layer-02`, `curve-20` and `global-std-20` with the 2a recipe.
+
 ## Original uniform pruning experiment
 
 ```sh

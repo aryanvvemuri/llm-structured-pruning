@@ -1,0 +1,69 @@
+{
+  "task": "support",
+  "dataset": "doc2dial",
+  "support_data_dir": "datasets/doc2dial_v2",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "device": "mps",
+  "dtype": "float32",
+  "seed": 20261114,
+  "counts": {
+    "recovery": 1800,
+    "calibration": 150,
+    "dev": 600,
+    "test": 224
+  },
+  "targets": [
+    0.1,
+    0.2
+  ],
+  "tiers_pp": [
+    0,
+    5,
+    10
+  ],
+  "selection_reference": "unpruned-recovery",
+  "select_uniform": true,
+  "evaluate_all_candidates": true,
+  "selection_dev_examples": 150,
+  "skip_full_merged_dev": true,
+  "eval_batch_size": 16,
+  "include_controls": true,
+  "max_length": 512,
+  "max_new_tokens": 64,
+  "sensitivity_examples": 16,
+  "benchmark_examples": 32,
+  "benchmark_repeats": 3,
+  "recovery": {
+    "rank": 8,
+    "alpha": 16,
+    "learning_rate": 0.0002,
+    "max_steps": 450,
+    "gradient_accumulation": 4,
+    "checkpoints": [
+      150,
+      300,
+      450
+    ],
+    "seed": 20261114,
+    "gradient_checkpointing": false,
+    "lr_schedule": "cosine",
+    "warmup_steps": 20,
+    "min_lr_ratio": 0.1
+  },
+  "store_example_losses": true,
+  "allocation": {
+    "methods": [
+      "legacy",
+      "curve",
+      "global-standardized"
+    ]
+  },
+  "uniform_per_target": true,
+  "train_candidates": [
+    "unpruned-recovery",
+    "uniform-20",
+    "per-layer-02",
+    "curve-20",
+    "global-std-20"
+  ]
+}
