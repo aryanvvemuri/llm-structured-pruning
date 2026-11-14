@@ -40,6 +40,15 @@ def lr_factor(update, steps, schedule='constant', warmup=0, min_ratio=0.0):
     return min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
 
 
+def validate_checkpoints(recovery):
+    """Explicit checkpoints must lie within max_steps; otherwise they would silently never be assessed."""
+    steps, checkpoints = recovery.get('max_steps', 200), recovery.get('checkpoints')
+    if checkpoints is not None and type(steps) is int and any(
+            type(v) is int and v > steps for v in checkpoints):
+        raise ValueError(f'recovery checkpoints {checkpoints} exceed max_steps {steps}')
+
+
 def validate_recipe(recovery):
     """Config-time validation of all opt-in recovery recipe keys."""
+    validate_checkpoints(recovery)
     validate_schedule(recovery)
