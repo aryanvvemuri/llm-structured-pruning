@@ -396,8 +396,6 @@ def test_warmup_must_fit_each_stage(base):
         campaign.validate_config(broken)
 
 
-@pytest.mark.xfail(strict=True, reason='Low: an infeasible final stage target (beyond the 25% keep floor) passes '
-                   'validate_config and fails only inside fit, after preflight, the baseline and Taylor scoring.')
 def test_infeasible_stage_target_rejected_up_front(base):
     config, _ = base
     broken = json.loads(json.dumps(config))
@@ -407,9 +405,6 @@ def test_infeasible_stage_target_rejected_up_front(base):
         campaign.validate_config(broken)
 
 
-@pytest.mark.xfail(strict=True, reason='Low: stages whose uniform widths coincide (e.g. 0.10 and 0.11 at one '
-                   'uniform step) are accepted; stage 2 then prunes nothing and the candidate is a 2-stage restart, '
-                   'not iterative pruning, without any warning or record flag.')
 def test_stages_with_identical_widths_rejected(base):
     from prune_lab.allocation import allocate_neurons
     from prune_lab.modeling import load_model

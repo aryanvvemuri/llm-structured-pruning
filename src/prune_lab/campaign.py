@@ -108,6 +108,7 @@ def validate_config(config):
         if reference != "original" and reference not in chosen:
             raise ValueError(f"train_candidates must include the selection reference {reference}")
     specs = candidate_specs(config)  # Validates allocation options, names and train_candidates.
+    iterative_stage_widths(config)  # Feasibility and strictly shrinking widths, from the model shape only.
     if config.get("allocation") is not None and allocation_options(config)["curve_sensitivity_examples"] is not None:
         calibration = (config.get("counts") or {}).get("calibration")
         if isinstance(calibration, int) and allocation_options(config)["curve_sensitivity_examples"] > calibration:
@@ -357,6 +358,48 @@ def iterative_options(config):
     return items
 
 
+def iterative_stage_widths(config, model=None):
+    """Uniform per-layer widths of every iterative stage; rejects infeasible or non-shrinking stages.
+
+    Uses ``model`` when given, otherwise a weightless (meta-device) model built from the source
+    config. Uniform allocation depends only on shapes, so placeholder scores are exact here.
+    Returns None when the model config cannot be read offline (fit re-checks with the real model).
+    """
+    import torch
+    from .allocation import allocate_neurons
+    from .modeling import mlp_layers
+    items = iterative_options(config)
+    if not items:
+        return {}
+    if model is None:
+        from transformers import AutoConfig
+        from .modeling import CompactQwen2ForCausalLM
+        try:
+            source = AutoConfig.from_pretrained(config["model"], cache_dir=config.get("cache_dir"),
+                                                local_files_only=True, trust_remote_code=False)
+        except (OSError, ValueError):
+            return None
+        with torch.device("meta"):
+            model = CompactQwen2ForCausalLM(source)
+    widths = [m.down_proj.in_features for m in mlp_layers(model)]
+    scores = {i: torch.arange(w, dtype=torch.float32) for i, w in enumerate(widths)}
+    result = {}
+    for item in items:
+        stage_widths = []
+        for target in item["stages"]:
+            try:
+                keep = allocate_neurons(model, scores, {i: 1.0 for i in scores}, target, config["group_size"],
+                                        config["min_keep_ratio"], True)
+            except ValueError as exc:
+                raise ValueError(f"Iterative candidate {item['id']}: stage target {target} is infeasible: {exc}") from exc
+            stage_widths.append(len(keep[0]))
+        if any(a <= b for a, b in zip([widths[0]] + stage_widths, stage_widths)):
+            raise ValueError(f"Iterative candidate {item['id']}: stages {item['stages']} give uniform widths {stage_widths}; "
+                             "every stage must prune further (strictly smaller width)")
+        result[item["id"]] = stage_widths
+    return result
+
+
 def stage_checkpoints(spec, recovery, stage):
     """Checkpoints of one stage: explicit, or the recipe's checkpoints scaled to the stage length."""
     steps = spec["steps"][stage]
@@ -466,6 +509,7 @@ def fit(config, output, state, splits):
     if not (output / "allocation.json").exists():
         model, tokenizer = _load(config)
         try:
+            iterative_stage_widths(config, model)  # Before the baseline and Taylor scoring.
             print("Measuring baseline development score and calibration importance", flush=True)
             baseline = {"dev": _evaluate(model, tokenizer, splits["dev"], config),
                         "parameters": count_parameters(model), "source_identity": _source_identity(config, model),
