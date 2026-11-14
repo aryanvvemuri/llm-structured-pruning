@@ -15,6 +15,22 @@ from .metrics import selection_score, score_name
 from .recipes import lr_factor, validate_schedule
 
 
+# Release cached MPS blocks after every optimizer update (N=1) and each assessment. Variable-length
+# batches otherwise make the MPS allocator cache ever more block sizes (driver memory reached
+# 16-19 GB over 450 updates on a 24 GB machine). Frees cache only: no numerical effect; measured
+# with a teacher over 160 updates: peak driver 18.0 GB -> 8.2 GB (N=1), 11.0 GB (N=10), same s/update.
+MPS_EMPTY_CACHE_EVERY = 1
+
+
+def _mps_housekeeping(stats, device, completed=None):
+    """Track peak MPS driver memory in ``stats`` and periodically empty the allocator cache."""
+    if device.type != 'mps':
+        return
+    stats['peak_mps_driver_bytes'] = max(stats.get('peak_mps_driver_bytes', 0), torch.mps.driver_allocated_memory())
+    if completed is None or (MPS_EMPTY_CACHE_EVERY and completed % MPS_EMPTY_CACHE_EVERY == 0):
+        torch.mps.empty_cache()
+
+
 class LoRALinear(nn.Module):
     def __init__(self, base, rank=8, alpha=16):
         super().__init__()
@@ -182,6 +198,7 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
                 best_metrics, best_step = metrics, step
                 best_snapshot = [p.detach().cpu().clone() for p in parameters]
             timing['assessment'] += time.perf_counter() - assess_start
+            _mps_housekeeping(timing, next(model.parameters()).device)
             return metrics
 
         initial = assess(0)
@@ -231,6 +248,7 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
                     distill_log['kl'].append(group_kl)
                 # The finiteness check above already synchronized the device.
                 timing['training'] += time.perf_counter() - update_start
+                _mps_housekeeping(timing, device, completed)
                 if completed in checkpoints:
                     assess(completed)
                 if completed == steps:
@@ -246,7 +264,8 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
                     raise FloatingPointError('Nonfinite merged weight')
         for _, _, adapter in wrappers:
             adapter.merge()
-        return {'initial_dev': initial, 'best_dev': best_metrics, 'best_step': best_step,
+        return {'peak_mps_driver_bytes': timing.get('peak_mps_driver_bytes'), 'mps_empty_cache_every': MPS_EMPTY_CACHE_EVERY,
+                'initial_dev': initial, 'best_dev': best_metrics, 'best_step': best_step,
                 'history': history, 'optimizer_steps': completed,
                 'trainable_parameters': sum(p.numel() for p in parameters),
                 'train_losses': train_losses, 'merged': True, 'seed': seed,
