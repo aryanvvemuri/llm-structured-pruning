@@ -186,6 +186,14 @@ HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab quantize --source runs/support-v2
 
 **Vocabulary trimming (improvement 6) was rejected.** Trimming the embedding to the 7,764 tokens of the training splits matched 20% MLP pruning (+0.03 F1, not established). It cost 1.57 F1 against the untrimmed model, because replies copy document words whose tokens were removed. See RESULTS.md and branch `experiment/6-vocabulary`.
 
+### Improvement 5: pruned Qwen2.5-1.5B against native 0.5B
+
+See `plans/improvement-5-larger-model.md`. `configs/support-v2-1p5b.json` is the 2a recipe and v2 data with `Qwen/Qwen2.5-1.5B-Instruct`. It trains `unpruned-recovery`, `uniform-25` and `uniform-50`; the tokenizer is byte-identical to 0.5B's. The recipe values are the 0.5B ones, fixed in advance and not tuned for 1.5B.
+
+Exact sizes: original 1,543,714,304 parameters, `uniform-25` 1,155,610,112 (25.14% removed), and `uniform-50` 775,763,456 (49.75%). MLP-only pruning with a 25% floor removes at most 867,041,280 (56.17%), leaving 676,673,024. That is still 37% larger than the 494,032,768-parameter 0.5B model, so a size-matched comparison is impossible here.
+
+`multi-seed compare` refuses runs of different base models unless `--allow-different-models` is given; seeds are then unpaired by default. `scripts/preflight_model.py` measures seconds per update and per reply, and peak MPS driver memory, on recovery data only. It also applies the plan's seed-count rule.
+
 ## Original uniform pruning experiment
 
 ```sh

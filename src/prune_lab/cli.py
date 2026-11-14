@@ -161,7 +161,8 @@ def run_multi_seed(args):
                 raise ValueError("--pair expects BASELINE_VARIANT:CANDIDATE_VARIANT")
         paired = True if args.paired_seeds else False if args.unpaired_seeds else None
         result = multiseed.compare_runs(args.baseline, args.candidate, pairs, args.split, paired,
-                                        args.samples, args.bootstrap_seed, args.allow_different_schedules)
+                                        args.samples, args.bootstrap_seed, args.allow_different_schedules,
+                                        args.allow_different_models)
         output = Path(args.output or Path(args.candidate) / f"compare-vs-{Path(args.baseline).resolve().name}.json")
         write_json(output, result)
         output.with_suffix(".md").write_text(multiseed.render_comparison(result))
@@ -235,6 +236,8 @@ def main(argv=None):
     pairing.add_argument("--paired-seeds", action="store_true",
                          help="Force pairing by seed value (default: paired whenever both seed sets are identical)")
     pairing.add_argument("--unpaired-seeds", action="store_true", help="Force independent seed resampling per run")
+    seeds_compare.add_argument("--allow-different-models", action="store_true",
+                               help="Permit comparing runs of different base models (seeds are then unpaired by default)")
     seeds_compare.add_argument("--allow-different-schedules", action="store_true",
                                help="Permit dev-full decisions between runs with different recovery checkpoints/max_steps")
     seeds_compare.add_argument("--output")

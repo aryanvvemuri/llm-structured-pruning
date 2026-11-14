@@ -187,7 +187,7 @@ def collect_run(root, split="dev"):
     if not directories:
         raise ValueError(f"No seed-* campaign directories under {root}")
     seeds, incomplete, dataset, subsets, protocol, schedules, selection_keys = {}, [], None, set(), None, set(), None
-    recipes = set()
+    recipes, models = set(), set()
     for directory in directories:
         if not (directory / "selection-lock.json").exists():
             incomplete.append(directory.name)
@@ -223,6 +223,7 @@ def collect_run(root, split="dev"):
             selection_keys = sorted(subset["keys"])
         schedules.add(json.dumps(recovery_schedule(config), sort_keys=True))
         recipes.add(json.dumps(recovery_recipe(config), sort_keys=True))
+        models.add(config.get("model"))
         variants = {}
         baseline = selection["baseline"]
         if split == "dev":
@@ -249,12 +250,14 @@ def collect_run(root, split="dev"):
         raise ValueError(f"Seeds in {root} used different checkpoint-selection dev subsets")
     if len(schedules) > 1:
         raise ValueError(f"Seeds in {root} used different recovery schedules")
+    if len(models) > 1:
+        raise ValueError(f"Seeds in {root} used different base models: {sorted(map(str, models))}")
     if len(recipes) > 1:
         raise ValueError(f"Seeds in {root} used different recovery recipes (schedule, distillation, adapter targets, ...)")
     subset = next(iter(subsets))
     return {"root": str(root), "split": split, "dataset": dataset, "seeds": seeds, "incomplete": incomplete,
             "evaluation_protocol": protocol, "recovery_schedule": json.loads(next(iter(schedules))),
-            "recovery_recipe": json.loads(next(iter(recipes))),
+            "recovery_recipe": json.loads(next(iter(recipes))), "base_model": next(iter(models)),
             "selection_keys": selection_keys,
             "selection_dev_subset": None if subset is None else {"count": subset[0], "keys_sha256": subset[1]}}
 
@@ -557,15 +560,24 @@ def _cross_run(a, b, pairs, paired_seeds, samples, seed):
 
 
 def compare_runs(baseline_root, candidate_root, pairs=None, split="dev", paired_seeds=None, samples=4000, seed=17,
-                 allow_different_schedules=False):
+                 allow_different_schedules=False, allow_different_models=False):
     """Compare variants across two multi-seed runs on the same split data (e.g. new method vs main).
 
     ``paired_seeds=None`` pairs by seed value whenever a pair's seed sets are identical (the
     documented protocol) and resamples seeds independently otherwise; True/False force it.
     On dev with a selection subset, the headline uses dev-holdout (examples outside both runs'
     selection subsets). Dev-full decisions need identical recovery schedules unless allowed.
+    Runs of different base models are refused unless ``allow_different_models``; then the
+    automatic pairing is independent, because shared seed values share no randomness.
     """
     a, b = collect_run(baseline_root, split), collect_run(candidate_root, split)
+    same_model = a["base_model"] == b["base_model"]
+    if not same_model:
+        if not allow_different_models:
+            raise ValueError(f"Runs use different base models ({a['base_model']} vs {b['base_model']}); "
+                             "pass --allow-different-models to compare them explicitly")
+        if paired_seeds is None:
+            paired_seeds = False
     if a["dataset"][split] != b["dataset"][split]:
         raise ValueError(f"Runs use different {split} data; comparison would be unpaired")
     if a["evaluation_protocol"] != b["evaluation_protocol"]:
@@ -595,6 +607,8 @@ def compare_runs(baseline_root, candidate_root, pairs=None, split="dev", paired_
             "secondary": {name: value for name, value in results.items() if name != headline},
             "secondary_withheld": withheld,
             "recovery_recipes": {"baseline": a["recovery_recipe"], "candidate": b["recovery_recipe"]},
+            "base_models": {"baseline": a["base_model"], "candidate": b["base_model"], "identical": same_model},
+            "allow_different_models": allow_different_models,
             "recovery_schedules": {"baseline": a["recovery_schedule"], "candidate": b["recovery_schedule"],
                                    "identical": same_schedule},
             "allow_different_schedules": allow_different_schedules,
@@ -687,6 +701,10 @@ def render_comparison(result):
              f"Headline example set: **{result['example_set']}** ({result['example_count']} examples). Recovery schedules: "
              f"baseline {json.dumps(result['recovery_schedules']['baseline'])}, candidate {json.dumps(result['recovery_schedules']['candidate'])}"
              + (" (different schedules explicitly allowed)." if result["allow_different_schedules"] else "."), ""]
+    models = result["base_models"]
+    if not models["identical"]:
+        lines += [f"**Different base models (explicitly allowed):** baseline `{models['baseline']}`, candidate "
+                  f"`{models['candidate']}`. Seeds share numbers only, not randomness; sizes differ, see parameter counts.", ""]
     lines += _decision_lines(result["comparisons"]) + ["", "## Differences", ""]
     lines += _comparison_rows(result["comparisons"])
     lines += _secondary_lines(result)
