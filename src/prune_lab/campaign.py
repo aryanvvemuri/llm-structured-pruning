@@ -91,6 +91,10 @@ def validate_config(config):
         raise ValueError("eval_batch_size > 1 is implemented only for the support task")
     if not isinstance(config.get("skip_full_merged_dev", False), bool):
         raise ValueError("skip_full_merged_dev must be true or false")
+    if not isinstance(config.get("store_example_losses", False), bool):
+        raise ValueError("store_example_losses must be true or false")
+    from .recipes import validate_recipe
+    validate_recipe(config["recovery"])
 
 
 def selection_dev_subset(dev, count, seed):
@@ -189,6 +193,9 @@ def _evaluate(model, tokenizer, examples, config):
     if config.get("task") == "support":
         from .support_evaluation import evaluate_support
         batch_size = config.get("eval_batch_size", 1)
+        if config.get("store_example_losses", False):
+            return evaluate_support(model, tokenizer, examples, config["max_length"], config["max_new_tokens"],
+                                    batch_size, example_losses=True)
         if batch_size == 1:
             return evaluate_support(model, tokenizer, examples, config["max_length"], config["max_new_tokens"])
         return evaluate_support(model, tokenizer, examples, config["max_length"], config["max_new_tokens"], batch_size)

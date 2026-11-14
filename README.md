@@ -150,6 +150,14 @@ Two opt-in campaign options, both enabled in `configs/support-v2.json` and absen
 
 The original-model baseline and every candidate's reported dev result are still full 600-example evaluations of the reloaded export; aggregation uses only these and rejects incomplete records. **The selection subset is part of that reported development set**, so reported development scores are slightly optimistic about choosing checkpoint updates; the multi-seed report states this. Per seed, the cost is about 5,400 development generations (600 baseline + 4 candidates × (3 × 150 selection + 150 merge check + 600 reload)) instead of 12,600. Later seeds reuse the baseline, so they need about 4,800. Preflight's 16 short checks and one warmup per evaluation come on top.
 
+### Improvement 2 recovery recipes (opt-in)
+
+See `plans/improvement-2-recovery.md`. Every option lives under `recovery` and is absent by default, so existing configurations, fingerprints and training are unchanged.
+
+- **2a, longer schedule** (`configs/support-v2-longer.json`): one full pass over the 1,800 recovery examples, with `max_steps: 450`, `checkpoints: [150, 300, 450]` and `lr_schedule: "cosine"`. The rate is linear warmup `(u+1)/warmup_steps` over 20 updates, then a cosine from the 2e-4 peak, reaching `min_lr_ratio` (10%) after the last update. The default `"constant"` never touches the optimizer's rate.
+- **Recorded recipe:** each candidate record stores `recovery.recipe`, the rate of every update (`learning_rates`), the rate in force at each assessed checkpoint, and `training_seconds`/`assessment_seconds`. `multi-seed compare` records both runs' recipes.
+- **Per-example losses** (`store_example_losses: true`, on in the improvement-2 configs): dev records gain per-example `answer_token_loss`/`answer_tokens`, so loss can be bootstrapped later. Nothing else in the record changes.
+
 ## Original uniform pruning experiment
 
 ```sh

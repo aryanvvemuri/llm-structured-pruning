@@ -96,3 +96,14 @@ def test_eval_batch_size_validation():
             campaign.validate_config(dict(config, eval_batch_size=bad))
     with pytest.raises(ValueError, match='support task'):
         campaign.validate_config(dict(config, eval_batch_size=4))
+
+
+@pytest.mark.parametrize('batch_size', [1, 4])
+def test_opt_in_per_example_losses(setup, batch_size):
+    model, tokenizer, examples, single = setup
+    assert 'answer_token_loss' not in single['predictions'][0]
+    result = evaluate_support(model, tokenizer, examples, 128, 8, batch_size=batch_size, example_losses=True)
+    rows = result['predictions']
+    assert sum(r['answer_token_loss'] * r['answer_tokens'] for r in rows) / sum(r['answer_tokens'] for r in rows) == \
+        pytest.approx(result['answer_token_loss'], rel=1e-12)
+    assert [{k: v for k, v in r.items() if k not in ('seconds', 'answer_token_loss', 'answer_tokens')} for r in rows] == strip(single)

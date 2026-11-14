@@ -28,6 +28,11 @@ def evaluation_protocol(config):
 SHARED_FILES = ("baseline.json", "allocation.json")
 
 
+def recovery_recipe(config):
+    """Every recovery setting except the seed (schedule, adapters, distillation, ...)."""
+    return {k: v for k, v in config.get("recovery", {}).items() if k != "seed"}
+
+
 def recovery_schedule(config):
     recovery = config.get("recovery", {})
     return {"max_steps": recovery.get("max_steps"), "checkpoints": recovery.get("checkpoints")}
@@ -216,6 +221,7 @@ def collect_run(root, split="dev"):
                 raise ValueError(f"{directory.name}: selection-dev.json keys do not match its count")
             selection_keys = sorted(subset["keys"])
         schedules.add(json.dumps(recovery_schedule(config), sort_keys=True))
+        recipe = recovery_recipe(config)
         variants = {}
         baseline = selection["baseline"]
         if split == "dev":
@@ -245,6 +251,7 @@ def collect_run(root, split="dev"):
     subset = next(iter(subsets))
     return {"root": str(root), "split": split, "dataset": dataset, "seeds": seeds, "incomplete": incomplete,
             "evaluation_protocol": protocol, "recovery_schedule": json.loads(next(iter(schedules))),
+            "recovery_recipe": recipe,
             "selection_keys": selection_keys,
             "selection_dev_subset": None if subset is None else {"count": subset[0], "keys_sha256": subset[1]}}
 
@@ -523,7 +530,7 @@ def aggregate_run(root, split="dev", samples=4000, seed=17):
                "interval_note": INTERVAL_NOTE, "decision_note": DECISION_NOTE,
                "selection_dev_subset": run["selection_dev_subset"],
                "selection_note": _selection_note(run["selection_dev_subset"], run["dataset"]["dev"]["count"]),
-               "recovery_schedule": run["recovery_schedule"],
+               "recovery_schedule": run["recovery_schedule"], "recovery_recipe": run["recovery_recipe"],
                "within_run_seed_pairing": "Variants from the same seed directory are paired by seed."}
     suffix = "" if split == "dev" else "-test"
     write_json(Path(root) / f"multi-seed-summary{suffix}.json", summary)
@@ -584,6 +591,7 @@ def compare_runs(baseline_root, candidate_root, pairs=None, split="dev", paired_
             "variants": results[headline]["variants"], "comparisons": results[headline]["comparisons"],
             "secondary": {name: value for name, value in results.items() if name != headline},
             "secondary_withheld": withheld,
+            "recovery_recipes": {"baseline": a["recovery_recipe"], "candidate": b["recovery_recipe"]},
             "recovery_schedules": {"baseline": a["recovery_schedule"], "candidate": b["recovery_schedule"],
                                    "identical": same_schedule},
             "allow_different_schedules": allow_different_schedules,

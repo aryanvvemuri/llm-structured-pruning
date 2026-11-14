@@ -5,12 +5,14 @@ Only the best checkpoint's adapter tensors are kept, on CPU.
 """
 import math
 import random
+import time
 
 import torch
 from torch import nn
 
 from .modeling import mlp_layers
 from .metrics import selection_score, score_name
+from .recipes import lr_factor, validate_schedule
 
 
 class LoRALinear(nn.Module):
@@ -62,6 +64,7 @@ def recover_model(model, train_batches, evaluate_dev, config):
         raise ValueError('checkpoints must be positive integer optimizer steps')
     if any(not math.isfinite(v) or v <= 0 for v in (alpha, lr, clip)):
         raise ValueError('alpha, learning_rate and max_grad_norm must be positive and finite')
+    schedule, warmup, min_ratio = validate_schedule(config)
     batches = list(train_batches)
     if not batches:
         raise ValueError('Recovery requires supervised batches')
@@ -114,8 +117,12 @@ def recover_model(model, train_batches, evaluate_dev, config):
         optimizer = torch.optim.AdamW(parameters, lr=lr, weight_decay=0.0)
         device = next(model.parameters()).device
 
+        timing = {'training': 0.0, 'assessment': 0.0}
+        learning_rates = []
+
         def assess(step):
             nonlocal best_snapshot, best_metrics, best_step
+            assess_start = time.perf_counter()
             modes = [(module, module.training) for module in model.modules()]
             flags = [(p, p.requires_grad) for p in model.parameters()]
             try:
@@ -128,11 +135,13 @@ def recover_model(model, train_batches, evaluate_dev, config):
                 for p, flag in flags:
                     p.requires_grad_(flag)
                 model.config.use_cache = False
-            history.append({'step': step, 'dev': metrics})
+            history.append({'step': step, 'dev': metrics,
+                            'learning_rate': learning_rates[-1] if learning_rates else None})
             print(f"Recovery step {step}/{steps}: dev {score_name(metrics)} {100 * score[0]:.2f}/100, answer loss {-score[1]:.4f}", flush=True)
             if best_metrics is None or score > _metric(best_metrics):
                 best_metrics, best_step = metrics, step
                 best_snapshot = [p.detach().cpu().clone() for p in parameters]
+            timing['assessment'] += time.perf_counter() - assess_start
             return metrics
 
         initial = assess(0)
@@ -141,6 +150,7 @@ def recover_model(model, train_batches, evaluate_dev, config):
             order = list(range(len(batches)))
             rng.shuffle(order)
             for start in range(0, len(order), accumulation):
+                update_start = time.perf_counter()
                 group = order[start:start + accumulation]
                 total_tokens = sum(token_counts[i] for i in group)
                 model.train()
@@ -156,6 +166,10 @@ def recover_model(model, train_batches, evaluate_dev, config):
                         weighted_loss.backward()
                     group_loss += float(loss.detach()) * token_counts[i] / total_tokens
                 torch.nn.utils.clip_grad_norm_(parameters, clip, error_if_nonfinite=True)
+                if schedule != 'constant':  # The constant default never touches the optimizer's rate.
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = lr * lr_factor(completed, steps, schedule, warmup, min_ratio)
+                learning_rates.append(optimizer.param_groups[0]['lr'])
                 optimizer.step()
                 # Reduce on device before one host check; per-tensor bool calls
                 # otherwise force hundreds of MPS synchronizations per update.
@@ -163,6 +177,8 @@ def recover_model(model, train_batches, evaluate_dev, config):
                     raise FloatingPointError('Nonfinite adapter parameter')
                 completed += 1
                 train_losses.append(group_loss)
+                # The finiteness check above already synchronized the device.
+                timing['training'] += time.perf_counter() - update_start
                 if completed in checkpoints:
                     assess(completed)
                 if completed == steps:
@@ -181,7 +197,12 @@ def recover_model(model, train_batches, evaluate_dev, config):
         return {'initial_dev': initial, 'best_dev': best_metrics, 'best_step': best_step,
                 'history': history, 'optimizer_steps': completed,
                 'trainable_parameters': sum(p.numel() for p in parameters),
-                'train_losses': train_losses, 'merged': True, 'seed': seed}
+                'train_losses': train_losses, 'merged': True, 'seed': seed,
+                'learning_rates': learning_rates, 'training_seconds': timing['training'],
+                'assessment_seconds': timing['assessment'],
+                'recipe': {'lr_schedule': schedule, 'peak_learning_rate': lr, 'warmup_steps': warmup,
+                           'min_lr_ratio': min_ratio, 'max_steps': steps, 'checkpoints': sorted(checkpoints),
+                           'gradient_accumulation': accumulation, 'rank': rank, 'alpha': alpha}}
     finally:
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)

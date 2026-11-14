@@ -67,7 +67,8 @@ def generation_batches(examples, tokenizer, batch_size):
     return [rows[start:start + batch_size] for start in range(0, len(rows), batch_size)]
 
 
-def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=64, batch_size=1):
+def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=64, batch_size=1,
+                     example_losses=False):
     """Evaluate batch-one CE and greedy replies after one unmeasured warmup.
 
     Like evaluate_model, leaves the model in eval mode. Loss is weighted by
@@ -75,6 +76,7 @@ def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=
     ``batch_size`` > 1 batches only generation (left padding + attention mask, same
     greedy settings, per-sequence EOS truncation); the loss stays batch-one so it is
     numerically unchanged. Per-reply ``seconds`` is then the batch time divided evenly.
+    ``example_losses`` adds each reply's answer-token mean loss and token count to its row.
     """
     import torch
     if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or max_new_tokens < 1:
@@ -91,7 +93,7 @@ def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=
     device = next(model.parameters()).device
     model.eval()
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    loss_sum, supervised = 0.0, 0
+    loss_sum, supervised, per_example = 0.0, 0, []
     rows, elapsed, tokens = [], 0.0, 0
     with torch.inference_mode():
         for batch in batches:
@@ -104,6 +106,7 @@ def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=
                 raise ValueError('Nonfinite or negative support answer-token loss')
             loss_sum += loss * n
             supervised += n
+            per_example.append((loss, n))
 
         def generate(ex):
             ids = torch.tensor([prompt_ids(tokenizer, ex.prompt)], device=device, dtype=torch.long)
@@ -141,6 +144,9 @@ def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=
             tokens += len(generated)
             if len(examples) >= 100 and len(rows) % 50 == 0:
                 print(f"Support evaluation: {len(rows)}/{len(examples)} replies", flush=True)
+    if example_losses:
+        for row, (loss, n) in zip(rows, per_example):
+            row['answer_token_loss'], row['answer_tokens'] = loss, n
     aggregate = {name: sum(row[name] for row in rows) / len(rows)
                  for name in ('token_f1', 'rouge_l', 'exact_match')}
     return {'selection_score': aggregate['token_f1'], 'score_name': 'token_f1', **aggregate,
