@@ -49,15 +49,38 @@ def reply_metrics(prediction, reference):
             'exact_match': float(predicted == expected)}
 
 
-def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=64):
+def _eos_ids(model, tokenizer):
+    # Exactly the ids generate() stops on; no tokenizer fallback, matching the batch-one path.
+    value = getattr(getattr(model, 'generation_config', None), 'eos_token_id', None)
+    return set(value if isinstance(value, (list, tuple)) else [] if value is None else [value])
+
+
+def generation_batches(examples, tokenizer, batch_size):
+    """Deterministic length buckets: sort by (prompt length, key), then chunk.
+
+    Composition depends only on the example set, not its input order. Returns lists of
+    (original index, prompt ids).
+    """
+    encoded = sorted(((len(ids), ex.key, i, ids) for i, ex in enumerate(examples)
+                      for ids in [prompt_ids(tokenizer, ex.prompt)]), key=lambda x: (x[0], x[1]))
+    rows = [(i, ids) for _, _, i, ids in encoded]
+    return [rows[start:start + batch_size] for start in range(0, len(rows), batch_size)]
+
+
+def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=64, batch_size=1):
     """Evaluate batch-one CE and greedy replies after one unmeasured warmup.
 
     Like evaluate_model, leaves the model in eval mode. Loss is weighted by
     supervised shifted answer tokens (including EOS); prompt labels are ignored.
+    ``batch_size`` > 1 batches only generation (left padding + attention mask, same
+    greedy settings, per-sequence EOS truncation); the loss stays batch-one so it is
+    numerically unchanged. Per-reply ``seconds`` is then the batch time divided evenly.
     """
     import torch
     if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or max_new_tokens < 1:
         raise ValueError('max_new_tokens must be a positive integer')
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError('batch_size must be a positive integer')
     examples = list(examples)
     if not examples:
         raise ValueError('No support evaluation examples')
@@ -89,9 +112,14 @@ def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=
                                     pad_token_id=pad_id, use_cache=True)
             return result[0, ids.shape[1]:]
 
-        generate(examples[0])
-        synchronize(device)
-        for ex in examples:
+        if batch_size > 1:
+            rows = _generate_batched(model, tokenizer, examples, max_new_tokens, batch_size, pad_id, device)
+            elapsed = sum(row['seconds'] for row in rows)
+            tokens = sum(row['generated_tokens'] for row in rows)
+        else:
+            generate(examples[0])
+            synchronize(device)
+        for ex in (examples if batch_size == 1 else []):
             synchronize(device)
             start = time.perf_counter()
             generated = generate(ex)
@@ -123,7 +151,57 @@ def evaluate_support(model, tokenizer, examples, max_length=512, max_new_tokens=
             'generation_limit_note': 'Fraction reaching the token cap; not confirmed truncation because EOS may occur on the final token.',
             'mean_example_seconds': elapsed / len(rows), 'warmup_examples': 1,
             'small_sample_warning': len(rows) < 100, 'memory': memory_snapshot(device),
-            'generation_config': {'do_sample': False, 'max_new_tokens': max_new_tokens, 'batch_size': 1},
+            'generation_config': ({'do_sample': False, 'max_new_tokens': max_new_tokens, 'batch_size': 1} if batch_size == 1 else
+                                  {'do_sample': False, 'max_new_tokens': max_new_tokens, 'batch_size': batch_size,
+                                   'padding': 'left', 'bucketing': 'sorted by (prompt tokens, key)',
+                                   'seconds_note': 'Per-reply seconds are batch wall time divided by batch size.'}),
             'metric_note': 'Lexical overlap proxies; not factual grounding, policy correctness, or human quality.',
             'normalization': 'Casefold; Unicode punctuation to spaces; remove English a/an/the; collapse whitespace.',
             'predictions': rows}
+
+
+def _generate_batched(model, tokenizer, examples, max_new_tokens, batch_size, pad_id, device):
+    import torch
+    if pad_id is None:
+        raise ValueError('Batched generation needs a pad or EOS token')
+    eos = _eos_ids(model, tokenizer)
+    batches = generation_batches(examples, tokenizer, batch_size)
+
+    def run(batch):
+        width = max(len(ids) for _, ids in batch)
+        ids = torch.tensor([[pad_id] * (width - len(x)) + x for _, x in batch], device=device, dtype=torch.long)
+        mask = torch.tensor([[0] * (width - len(x)) + [1] * len(x) for _, x in batch], device=device, dtype=torch.long)
+        result = model.generate(input_ids=ids, attention_mask=mask, do_sample=False, max_new_tokens=max_new_tokens,
+                                pad_token_id=pad_id, use_cache=True)
+        outputs = []
+        for row in result[:, width:].tolist():
+            stop = next((j for j, token in enumerate(row) if token in eos), None)
+            outputs.append(row if stop is None else row[:stop + 1])  # Keep EOS as the single path does.
+        return outputs
+
+    run(batches[0])  # Unmeasured warmup, like the batch-one path.
+    synchronize(device)
+    rows = [None] * len(examples)
+    for batch in batches:
+        synchronize(device)
+        start = time.perf_counter()
+        outputs = run(batch)
+        synchronize(device)
+        seconds = time.perf_counter() - start
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError('Invalid generation duration')
+        for (index, _), generated in zip(batch, outputs):
+            ex = examples[index]
+            prediction = tokenizer.decode(generated, skip_special_tokens=True)
+            metrics = reply_metrics(prediction, ex.answer)
+            row = {'key': ex.key, 'prediction': prediction, 'expected': ex.answer,
+                   'score': metrics['token_f1'], **metrics, 'seconds': seconds / len(batch),
+                   'generated_tokens': len(generated)}
+            for field in ('doc_id', 'dialogue_id', 'domain', 'group_id'):
+                value = getattr(ex, field, None)
+                if value is not None:
+                    row[field] = value
+            rows[index] = row
+    if len(examples) >= 100:
+        print(f"Support evaluation: {len(examples)}/{len(examples)} replies (batched)", flush=True)
+    return rows
