@@ -174,7 +174,7 @@ See `plans/improvement-4-quantization.md`. `prune-lab quantize` needs the option
 - **Logit check:** the converted model's logits are compared with the PyTorch export on calibration prompts.
 - **Evaluation:** dev is evaluated with the PyTorch path's prompt template, greedy decoding, `max_new_tokens`, EOS ids and repetition penalty, and its scoring code. Weight bytes, MLX peak memory and tokens/s (32 dev prompts, 3 repeats, after a warm-up) are recorded.
 - **Output:** each `<output>/seed-<s>/` is campaign-shaped. Candidates are `<variant>-<precision>` plus the source records as `<variant>-pytorch`, so `prune-lab multi-seed aggregate --run <output>` reports everything on dev-holdout.
-- **Limits:** MLX speed is only comparable with MLX speed. The test split is never read.
+- **Limits:** MLX speed is only comparable with MLX speed. The test split is never read. The `<variant>-pytorch` records come from batched PyTorch evaluation (`eval_batch_size` 16). There, transformers' repetition penalty also penalizes the left-pad token (Qwen2.5's `<|endoftext|>`, an EOS id), while the MLX loop reproduces batch-one greedy decoding. The fp16 MLX − PyTorch row can therefore include this batching effect as well as MLX numerics.
 
 ```sh
 HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab quantize --source runs/support-v2-allocator --output runs/support-v2-quant \

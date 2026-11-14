@@ -252,9 +252,6 @@ def test_record_for_record_parity_with_support_evaluation(tmp_path, boost):
     assert got['answer_token_loss'] == pytest.approx(expected['answer_token_loss'], rel=1e-5)
 
 
-@pytest.mark.xfail(strict=True, reason='DOUBTFUL (low): with no generation_config.json the MLX loop has no EOS ids '
-                   'and never stops, while transformers falls back to config.eos_token_id. Real exports from '
-                   'save_checkpoint always write generation_config.json, so the planned run is unaffected.')
 def test_missing_generation_config_stops_like_transformers(tmp_path):
     make_export(tmp_path / 'export', None, penalty=1.0, eos_boost=40.0, generation_config=False)
     from prune_lab.modeling import load_model
@@ -265,11 +262,11 @@ def test_missing_generation_config_stops_like_transformers(tmp_path):
     assert quantize.greedy_generate(mlx_model, PROMPTS[0], settings) == hf_generate(reference, PROMPTS[0], 4)
 
 
-@pytest.mark.xfail(strict=True, reason='PRE-EXISTING (support_evaluation, medium for interpreting "fp16 MLX - PyTorch"): '
-                   'batched PyTorch generation (eval_batch_size > 1, used for the v2 source records) left-pads with '
-                   'pad_token_id and transformers\' repetition penalty then also penalizes the pad token (for Qwen2.5 '
-                   '<|endoftext|>, an EOS id). Replies differ from batch-one greedy, which the MLX loop reproduces, so '
-                   'MLX-vs-PyTorch differences are not purely MLX effects.')
+@pytest.mark.xfail(strict=True, reason='Documented pre-existing limitation, intentionally not changed (it would change '
+                   'every existing record): batched PyTorch generation (eval_batch_size > 1) left-pads with pad_token_id '
+                   'and transformers\' repetition penalty also penalizes that pad token (for Qwen2.5 <|endoftext|>, an EOS '
+                   'id), so batched replies can differ from batch-one greedy, which the MLX loop reproduces. The '
+                   '"fp16 MLX - PyTorch" row can include this batching effect (see README and plan).')
 def test_batched_pytorch_records_equal_batch_one_under_repetition_penalty(tmp_path):
     from prune_lab.modeling import load_model
     from prune_lab.support_evaluation import evaluate_support
@@ -437,8 +434,6 @@ def test_export_hash_and_missing_variant_refused(source_run, tmp_path):
         run(source_run, tmp_path / 'q5', precisions=('3bit',))
 
 
-@pytest.mark.xfail(strict=True, reason='Low: a variant missing from a later seed is only reported after earlier '
-                   'seeds were fully converted and evaluated (no up-front check of every seed).')
 def test_missing_variant_detected_before_any_work(source_run, tmp_path, monkeypatch):
     from prune_lab import campaign
     seed_dir = source_run / 'seed-6'
@@ -469,10 +464,6 @@ def test_resume_reuses_results_and_discard_models(source_run, tmp_path, monkeypa
     assert multiseed.aggregate_run(output, samples=10)['seeds'] == [5, 6]
 
 
-@pytest.mark.xfail(strict=True, reason='BUG (medium): resume reuses an existing result.json without checking that '
-                   'its source_checkpoint_sha256 matches the current export, so re-running into the same output '
-                   'after the source export changed silently mixes MLX results of the old export with the '
-                   '<variant>-pytorch record of the new one.')
 def test_resume_refuses_result_built_from_a_different_export(source_run, tmp_path):
     from prune_lab import campaign
     output = tmp_path / 'quant'

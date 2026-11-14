@@ -64,6 +64,10 @@ Reported (dev-holdout token F1, 5 seeds, same decision machinery):
 | Pruning + quantization | uniform-20 4-bit − unpruned 4-bit; − unpruned fp16 |
 | Size/speed | bytes, tokens/s, peak memory per variant × precision |
 
+The PyTorch records were generated with `eval_batch_size` 16, where transformers' repetition penalty also
+penalizes the left-pad token (an EOS id for Qwen2.5); the MLX loop reproduces batch-one greedy decoding, so the
+"fp16 MLX − PyTorch" row can include this batching effect, not only MLX numerics.
+
 Plus a size-vs-F1 table: each variant × precision with bytes and mean F1, so
 the reader can see which point dominates.
 

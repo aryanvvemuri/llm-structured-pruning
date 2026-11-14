@@ -147,7 +147,11 @@ def convert(source, destination, precision):
 def generation_settings(directory, max_new_tokens):
     """EOS ids and repetition penalty that transformers' greedy ``generate`` would use."""
     path = Path(directory) / "generation_config.json"
-    config = json.loads(path.read_text()) if path.exists() else {}
+    if path.exists():
+        config = json.loads(path.read_text())
+    else:
+        # Like transformers' GenerationConfig.from_model_config: EOS from the model config.
+        config = {"eos_token_id": _read_config(directory).get("eos_token_id")}
     for key in UNSUPPORTED_GENERATION_KEYS:
         value = config.get(key)
         neutral = (None, [], 0) + ((1.0,) if key.endswith("penalty") else ())
@@ -336,7 +340,14 @@ def quantize_run(source, output, variants, precisions, seeds=None, check_prompts
         raise ValueError(f"precisions must be distinct values from {tuple(PRECISIONS)}")
     output = Path(output)
     summary, failures = [], []
-    for seed_dir in _seed_directories(source, seeds):
+    seed_dirs = _seed_directories(source, seeds)
+    missing = []  # Check every requested variant in every requested seed before any work.
+    for seed_dir in seed_dirs:
+        complete = {c["id"] for c in _selection(seed_dir)["candidates"] if c.get("status") == "complete"}
+        missing += [f"{seed_dir.name}/{variant}" for variant in variants if variant not in complete]
+    if missing:
+        raise ValueError(f"Variants without a complete export record: {missing}")
+    for seed_dir in seed_dirs:
         selection = _selection(seed_dir)
         config = read_campaign_config(seed_dir / "config.json")
         if config.get("task") != "support":
@@ -366,6 +377,9 @@ def quantize_run(source, output, variants, precisions, seeds=None, check_prompts
                 name = f"{variant}-{precision}"
                 directory = target / name
                 result_path = directory / "result.json"
+                if result_path.exists() and json.loads(result_path.read_text()).get("source_checkpoint_sha256") != identity:
+                    print(f"Redoing {seed_dir.name}/{name}: its result was built from a different export", flush=True)
+                    shutil.rmtree(directory)
                 if result_path.exists():
                     done = json.loads(result_path.read_text())
                     if precision in ("fp32", "fp16") and done.get("logit_check") and not done["logit_check"]["passed"]:
