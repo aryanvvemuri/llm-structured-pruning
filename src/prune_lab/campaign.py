@@ -93,8 +93,10 @@ def validate_config(config):
         raise ValueError("skip_full_merged_dev must be true or false")
     if not isinstance(config.get("store_example_losses", False), bool):
         raise ValueError("store_example_losses must be true or false")
-    from .recipes import validate_recipe
+    from .recipes import validate_recipe, validate_distillation
     validate_recipe(config["recovery"])
+    if validate_distillation(config["recovery"]) is not None and not config["include_controls"]:
+        raise ValueError("Distillation needs the unpruned-recovery control as its teacher")
 
 
 def selection_dev_subset(dev, count, seed):
@@ -368,8 +370,13 @@ def fit(config, output, state, splits):
         raise ValueError("Baseline changed after allocation")
     selection_dev = _selection_dev(config, output, splits.get("dev"))
     skip_merged = config.get("skip_full_merged_dev", False)
+    distill = config.get("recovery", {}).get("distillation")
+    specs = allocation["candidates"]
+    if distill is not None:
+        # The teacher (this seed's unpruned-recovery export) must be trained before any student.
+        specs = sorted(specs, key=lambda spec: spec["id"] != TEACHER_ID)
     candidates = []
-    for spec in allocation["candidates"]:
+    for spec in specs:
         directory = output / "candidates" / spec["id"]
         record_path = directory / "result.json"
         if record_path.exists():
@@ -380,7 +387,7 @@ def fit(config, output, state, splits):
                 continue
         print(f"Recovering {spec['id']}: target {spec['target']:.0%} total parameters", flush=True)
         start = time.perf_counter()
-        model = tokenizer = None
+        model = tokenizer = teacher = None
         try:
             model, tokenizer = _load(config)
             _verify_source(config, model, baseline)
@@ -388,7 +395,15 @@ def fit(config, output, state, splits):
                 compact_model(model, {int(k): v for k, v in spec["keep_indices"].items()})
             parameters = count_parameters(model)
             batches = make_batches(splits["recovery"], tokenizer, config["max_length"])
-            recovered = recover_model(model, batches, lambda m: _evaluate(m, tokenizer, selection_dev, config), config["recovery"])
+            teaching = None
+            if distill is not None and spec["target"]:
+                teacher, teaching = _load_teacher(config, candidates)
+            recovered = recover_model(model, batches, lambda m: _evaluate(m, tokenizer, selection_dev, config), config["recovery"],
+                                      **({"teacher": teacher} if teacher is not None else {}))
+            if teacher is not None:
+                del teacher
+                teacher = None
+                _release()
             # Selection uses the actual merged weights, not an unmerged adapter's score.
             merged_dev = _evaluate(model, tokenizer, selection_dev if skip_merged else splits["dev"], config)
             if not _valid_metrics(merged_dev):
@@ -400,7 +415,9 @@ def fit(config, output, state, splits):
                       "parameter_bytes": sum(p.numel() * p.element_size() for p in model.parameters()),
                       "layer_widths": [m.down_proj.in_features for m in mlp_layers(model)],
                       "dev": None if skip_merged else merged_dev, "recovery": recovered, "elapsed_seconds": time.perf_counter() - start,
-                      "memory_after": memory_snapshot(next(model.parameters()).device), **_provenance(model)}
+                      "memory_after": memory_snapshot(next(model.parameters()).device), **_provenance(model),
+                      **({"distillation": dict(teaching, alpha=distill["alpha"], temperature=distill["temperature"])}
+                         if teaching else {})}
             manifest = {"config": config, "dataset": state["dataset"], "selection_split": "dev",
                         "keep_indices": spec["keep_indices"], "candidate": record}
             save_checkpoint(model, tokenizer, checkpoint, manifest)
@@ -441,8 +458,10 @@ def fit(config, output, state, splits):
             candidates.append(failed)
             print(f"Candidate failed: {failed['error']}", flush=True)
         finally:
-            del model, tokenizer
+            del model, tokenizer, teacher
             _release()
+    order = [spec["id"] for spec in allocation["candidates"]]
+    candidates.sort(key=lambda record: order.index(record["id"]))
     reference_id = config.get("selection_reference", "original")
     reference = baseline
     if reference_id != "original":
@@ -458,6 +477,23 @@ def fit(config, output, state, splits):
     write_json(output / "selection.json", selection)
     write_json(output / "selection-lock.json", {"sha256": _fingerprint(selection)})
     return selection
+
+
+TEACHER_ID = "unpruned-recovery"
+
+
+def _load_teacher(config, candidates):
+    """Load this seed's recovered full model from its export, hash-checked, frozen and in eval mode."""
+    record = next((c for c in candidates if c["id"] == TEACHER_ID), None)
+    if record is None or record.get("status") != "complete":
+        raise ValueError("Distillation teacher (unpruned-recovery) is not complete for this seed")
+    _verify_checkpoint(record)
+    teacher, _ = _load(config, record["checkpoint"])
+    teacher.requires_grad_(False)
+    teacher.eval()
+    return teacher, {"teacher_id": TEACHER_ID, "teacher_checkpoint": record["checkpoint"],
+                     "teacher_checkpoint_sha256": record["checkpoint_sha256"],
+                     "teacher_memory_after_load": memory_snapshot(next(teacher.parameters()).device)}
 
 
 def _selection(output):

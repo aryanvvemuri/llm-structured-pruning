@@ -44,7 +44,16 @@ def _metric(metrics):
     return accuracy, -loss
 
 
-def recover_model(model, train_batches, evaluate_dev, config):
+def distillation_loss(student_logits, teacher_logits, labels, ce, alpha, temperature):
+    """alpha * CE + (1 - alpha) * T^2 * mean over answer tokens of KL(teacher_T || student_T)."""
+    mask = labels[:, 1:] != -100
+    student = torch.log_softmax(student_logits[:, :-1][mask].float() / temperature, dim=-1)
+    teacher = torch.log_softmax(teacher_logits[:, :-1][mask].float() / temperature, dim=-1)
+    kl = (teacher.exp() * (teacher - student)).sum(-1).mean()
+    return alpha * ce + (1 - alpha) * temperature ** 2 * kl, kl
+
+
+def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
     """Train adapters on answer-only batches and merge the best development state.
 
     ``evaluate_dev(model)`` returns selection_score (or accuracy) and answer_token_loss (or loss).
@@ -65,6 +74,12 @@ def recover_model(model, train_batches, evaluate_dev, config):
     if any(not math.isfinite(v) or v <= 0 for v in (alpha, lr, clip)):
         raise ValueError('alpha, learning_rate and max_grad_norm must be positive and finite')
     schedule, warmup, min_ratio = validate_schedule(config)
+    from .recipes import validate_distillation  # 2b; kept local so components stay separable
+    distill = validate_distillation(config)
+    if teacher is not None and distill is None:
+        raise ValueError('A teacher requires recovery.distillation settings')
+    if teacher is not None and any(p.requires_grad for p in teacher.parameters()):
+        raise ValueError('The distillation teacher must be frozen')
     batches = list(train_batches)
     if not batches:
         raise ValueError('Recovery requires supervised batches')
@@ -118,6 +133,9 @@ def recover_model(model, train_batches, evaluate_dev, config):
         device = next(model.parameters()).device
 
         timing = {'training': 0.0, 'assessment': 0.0}
+        distill_log = {'ce': [], 'kl': []}
+        if teacher is not None:
+            teacher.eval()
         learning_rates = []
 
         def assess(step):
@@ -155,11 +173,20 @@ def recover_model(model, train_batches, evaluate_dev, config):
                 total_tokens = sum(token_counts[i] for i in group)
                 model.train()
                 optimizer.zero_grad(set_to_none=True)
-                group_loss = 0.0
+                group_loss = group_ce = group_kl = 0.0
                 for i in group:
                     batch = {k: v.to(device) for k, v in batches[i].items()}
                     with torch.enable_grad():
-                        loss = model(**batch).loss
+                        output = model(**batch)
+                        loss = output.loss
+                        if teacher is not None:
+                            with torch.no_grad():
+                                teacher_logits = teacher(input_ids=batch['input_ids'], attention_mask=batch.get('attention_mask'),
+                                                         use_cache=False).logits
+                            ce = loss
+                            loss, kl = distillation_loss(output.logits, teacher_logits, batch['labels'], ce, *distill)
+                            group_ce += float(ce.detach()) * token_counts[i] / total_tokens
+                            group_kl += float(kl.detach()) * token_counts[i] / total_tokens
                         if not bool(torch.isfinite(loss)):
                             raise FloatingPointError('Nonfinite recovery loss')
                         weighted_loss = loss * (token_counts[i] / total_tokens)
@@ -177,6 +204,9 @@ def recover_model(model, train_batches, evaluate_dev, config):
                     raise FloatingPointError('Nonfinite adapter parameter')
                 completed += 1
                 train_losses.append(group_loss)
+                if teacher is not None:
+                    distill_log['ce'].append(group_ce)
+                    distill_log['kl'].append(group_kl)
                 # The finiteness check above already synchronized the device.
                 timing['training'] += time.perf_counter() - update_start
                 if completed in checkpoints:
@@ -202,7 +232,10 @@ def recover_model(model, train_batches, evaluate_dev, config):
                 'assessment_seconds': timing['assessment'],
                 'recipe': {'lr_schedule': schedule, 'peak_learning_rate': lr, 'warmup_steps': warmup,
                            'min_lr_ratio': min_ratio, 'max_steps': steps, 'checkpoints': sorted(checkpoints),
-                           'gradient_accumulation': accumulation, 'rank': rank, 'alpha': alpha}}
+                           'gradient_accumulation': accumulation, 'rank': rank, 'alpha': alpha},
+                **({'distillation': {'alpha': distill[0], 'temperature': distill[1],
+                                     'train_ce_losses': distill_log['ce'], 'train_kl_losses': distill_log['kl']}}
+                   if teacher is not None else {})}
     finally:
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
