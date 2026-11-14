@@ -65,7 +65,8 @@ dev-holdout, **unpaired** (different base models; seeds share numbers only):
 
 ```
 .venv/bin/python -m prune_lab multi-seed compare --baseline runs/support-v2-longer \
-  --candidate runs/support-v2-1p5b --pair unpruned-recovery:uniform-50 --unpaired-seeds
+  --candidate runs/support-v2-1p5b --pair unpruned-recovery:uniform-50 --unpaired-seeds \
+  --allow-different-models
 ```
 
 Reading: confident and positive → pruned 1.5B is better at 1.56× the size
