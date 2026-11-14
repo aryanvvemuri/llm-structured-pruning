@@ -56,6 +56,43 @@ An independent verifier recomputed all 30,000 per-example rows with 0 mismatches
 
 **`runs/support-v2-longer` is now the reference run for later improvements.**
 
+## Improvements 2b and 2c: distillation and attention LoRA (rejected)
+
+Both are compared with the accepted 2a run, `runs/support-v2-longer`. Numbers are token F1 on dev-holdout, 5 seeds (20261114–20261118), paired by seed. The test split remains sealed. Each component was tested in one predeclared setting and not tuned, to protect the development protocol. The code stays on branch `experiment/2-distill-attn`, not on `main`.
+
+### 2b: distillation from the recovered full model, rejected (no measurable effect)
+
+Run `runs/support-v2-distill`. Pruned candidates trained on equal parts answer-token cross entropy and temperature-2 KL to the same seed's recovered unpruned model.
+
+| Variant | Difference vs 2a | Bootstrap 95% | Seed t 95% | Decision |
+| --- | ---: | --- | --- | --- |
+| Uniform 10% (predeclared primary) | +0.025 | [−1.30, +1.26] | [−1.61, +1.66] | not established |
+| Per-layer 10% | −0.16 | | | not established |
+| Per-layer 20% | −0.15 | | | not established |
+
+Answer-token loss was consistently lower, by 0.013–0.026. That was not a predeclared measure, and it did not turn into better replies. Training took about 20% longer. The minimum detectable effect for uniform 10% is about 2.3 F1, and gains above about 1.7 F1 are ruled out.
+
+### 2c: LoRA on attention q/k/v/o as well as the MLP, rejected (no effect, or a gain below about 1 F1)
+
+Run `runs/support-v2-attn`. It adds 1,081,344 trainable parameters.
+
+| Variant | 2a mean F1 | 2c mean F1 | Difference | Bootstrap 95% | Seed t 95% | Decision |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| Uniform 10% (predeclared primary) | 54.32 | 54.61 | +0.29 | [−0.48, +1.06] | [−0.26, +0.83] | not established |
+| Recovery only | 54.89 | 55.34 | +0.45 | [−0.45, +1.33] | [−0.29, +1.19] | not established |
+| Per-layer 10% | 54.05 | 54.77 | +0.73 | [−0.10, +1.53] | [+0.46, +0.99] | not established (only t excludes 0; secondary) |
+| Per-layer 20% | 52.78 | 52.10 | −0.68 | [−2.12, +0.69] | [−2.38, +1.02] | not established |
+
+The minimum detectable effect is about 1.1 F1 at 80% power. Training took about 3% longer, and peak MPS driver memory was 7.4–8.6 GB.
+
+Caveats:
+- **Per-layer 20%, seed 20261118:** this seed lost 2.88 F1 because update 150 beat update 450 by 0.05 F1 on the selection subset. That is checkpoint-selection noise.
+- **One merge check was 149/150:** the merged-vs-reloaded check for recovery only, seed 20261118, matched on 149 of 150 replies. All reported numbers come from the reloaded model.
+
+### Memory fix (kept on `main`)
+
+These longer runs exposed growing MPS allocator caching: peak driver memory reached about 18 GB with a teacher on the 24 GB machine. Recovery now empties the MPS cache after every update and after each assessment, which brings the peak to 8.2 GB with bit-identical training losses.
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.
