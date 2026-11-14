@@ -6,6 +6,15 @@ import math
 
 
 LR_SCHEDULES = ('constant', 'cosine')
+LORA_TARGETS = {'mlp': ('gate_proj', 'up_proj', 'down_proj'), 'mlp+attention': ('gate_proj', 'up_proj', 'down_proj',
+                                                                                'q_proj', 'k_proj', 'v_proj', 'o_proj')}
+
+
+def validate_lora_targets(recovery):
+    targets = recovery.get('lora_targets', 'mlp')
+    if targets not in LORA_TARGETS:
+        raise ValueError(f'lora_targets must be one of {tuple(LORA_TARGETS)}')
+    return targets
 
 
 def validate_schedule(config):
@@ -58,5 +67,6 @@ def validate_distillation(recovery):
 
 def validate_recipe(recovery):
     """Config-time validation of all opt-in recovery recipe keys."""
+    validate_lora_targets(recovery)
     validate_schedule(recovery)
     validate_distillation(recovery)

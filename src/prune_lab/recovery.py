@@ -36,6 +36,15 @@ class LoRALinear(nn.Module):
         return self.base
 
 
+def attention_modules(model):
+    """Self-attention blocks of a dense Qwen2 model, with Linear q/k/v/o projections."""
+    modules = [layer.self_attn for layer in model.model.layers]
+    for module in modules:
+        if not all(isinstance(getattr(module, name, None), nn.Linear) for name in ('q_proj', 'k_proj', 'v_proj', 'o_proj')):
+            raise ValueError('Attention LoRA needs Linear q_proj/k_proj/v_proj/o_proj in every layer')
+    return modules
+
+
 def _metric(metrics):
     accuracy = selection_score(metrics)
     loss = float(metrics.get('answer_token_loss', metrics.get('loss', float('nan'))))
@@ -102,6 +111,10 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
             raise ValueError('Padding must not contribute recovery labels')
         token_counts.append(n)
     mlps = mlp_layers(model)
+    from .recipes import validate_lora_targets  # 2c; kept local so components stay separable
+    targets = validate_lora_targets(config)
+    if targets == 'mlp+attention':
+        attention_modules(model)  # Validate before any adapter is attached.
     original_flags = [(p, p.requires_grad) for p in model.parameters()]
     original_modes = [(m, m.training) for m in model.modules()]
     old_cache = getattr(model.config, 'use_cache', None)
@@ -123,6 +136,13 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
                 adapter = LoRALinear(getattr(mlp, name), rank, alpha)
                 wrappers.append((mlp, name, adapter))
                 setattr(mlp, name, adapter)
+        if targets == 'mlp+attention':
+            # Created after the MLP adapters, so MLP adapter initialization matches the MLP-only recipe.
+            for attention in attention_modules(model):
+                for name in ('q_proj', 'k_proj', 'v_proj', 'o_proj'):
+                    adapter = LoRALinear(getattr(attention, name), rank, alpha)
+                    wrappers.append((attention, name, adapter))
+                    setattr(attention, name, adapter)
         parameters = [p for _, _, module in wrappers for p in (module.A, module.B)]
         if config.get('gradient_checkpointing', False) and not old_checkpointing:
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
@@ -230,7 +250,7 @@ def recover_model(model, train_batches, evaluate_dev, config, teacher=None):
                 'train_losses': train_losses, 'merged': True, 'seed': seed,
                 'learning_rates': learning_rates, 'training_seconds': timing['training'],
                 'assessment_seconds': timing['assessment'],
-                'recipe': {'lr_schedule': schedule, 'peak_learning_rate': lr, 'warmup_steps': warmup,
+                'recipe': {'lora_targets': targets, 'lr_schedule': schedule, 'peak_learning_rate': lr, 'warmup_steps': warmup,
                            'min_lr_ratio': min_ratio, 'max_steps': steps, 'checkpoints': sorted(checkpoints),
                            'gradient_accumulation': accumulation, 'rank': rank, 'alpha': alpha},
                 **({'distillation': {'alpha': distill[0], 'temperature': distill[1],

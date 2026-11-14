@@ -52,8 +52,8 @@ def test_constant_default_is_unchanged_and_cosine_sets_rates():
     model_c, c = run(dict(base, lr_schedule='cosine', warmup_steps=2, min_lr_ratio=.1))
     assert c['learning_rates'] == pytest.approx([.01 * lr_factor(u, 6, 'cosine', 2, .1) for u in range(6)])
     assert [h['learning_rate'] for h in c['history']] == pytest.approx([None, c['learning_rates'][2], c['learning_rates'][5]])
-    assert c['recipe'] == {'lr_schedule': 'cosine', 'peak_learning_rate': .01, 'warmup_steps': 2, 'min_lr_ratio': .1,
-                           'max_steps': 6, 'checkpoints': [3, 6], 'gradient_accumulation': 2, 'rank': 2, 'alpha': 4}
+    assert c['recipe'].items() >= {'lr_schedule': 'cosine', 'peak_learning_rate': .01, 'warmup_steps': 2, 'min_lr_ratio': .1,
+                                   'max_steps': 6, 'checkpoints': [3, 6], 'gradient_accumulation': 2, 'rank': 2, 'alpha': 4}.items()
     assert any(not torch.equal(x, y) for x, y in zip(model_a.state_dict().values(), model_c.state_dict().values()))
 
 
