@@ -170,6 +170,19 @@ See `plans/improvement-1-allocator.md`. Without an `allocation` key the legacy a
 - `allocation.json` records the raw probes, processed curves, per-candidate removal fractions and calibration loss right after pruning.
 - `configs/support-v2-allocator.json` trains `unpruned-recovery`, `uniform-20`, `per-layer-02`, `curve-20` and `global-std-20` with the 2a recipe.
 
+### Improvement 7: iterative pruning (opt-in, under evaluation)
+
+See `plans/improvement-7-iterative.md`. Configure it with `iterative: [{"id": "iter-20", "stages": [0.10, 0.20], "steps": [225, 225]}]`, where `steps` must sum to `recovery.max_steps`.
+
+- **Stage 1:** prunes uniformly to the first target with the original Taylor scores, then recovers.
+- **Each later stage:** re-scores (Taylor, calibration) the merged previous-stage model and keeps the highest-scoring neurons per layer, down to the uniform width of its target. It then recovers again with fresh adapters.
+- **Final widths:** equal one-shot `uniform-<target>` exactly.
+- **Schedule and data:** each stage has its own schedule (the recipe's warmup and cosine over its updates; checkpoints scaled to the stage length, 75/150/225) and a seed derived from the recovery seed. The stages consume consecutive slices of the one-shot candidate's epoch order, so each recovery example is seen once.
+- **Resume:** intermediate stages are exported under `candidates/<id>/stage-<k>/`, so a restart resumes after the last finished stage; their weights are deleted once the final export is verified.
+- **Records:** each record's `iterative` field holds per-stage masks, score hashes, chosen checkpoints, data slices and the count of kept neurons that differ from the one-shot mask.
+
+`configs/support-v2-iterative.json` trains `unpruned-recovery`, `uniform-20` and `iter-20` with the 2a recipe.
+
 ## Original uniform pruning experiment
 
 ```sh

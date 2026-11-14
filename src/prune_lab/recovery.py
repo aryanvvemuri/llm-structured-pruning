@@ -167,7 +167,8 @@ def recover_model(model, train_batches, evaluate_dev, config):
         train_losses = []
         while completed < steps:
             order = list(range(len(batches)))
-            rng.shuffle(order)
+            if config.get('shuffle_batches', True):  # Iterative stages pass batches already in data order.
+                rng.shuffle(order)
             for start in range(0, len(order), accumulation):
                 update_start = time.perf_counter()
                 group = order[start:start + accumulation]

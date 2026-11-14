@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 import platform
 import random
+import shutil
 import statistics
 import time
 
@@ -321,6 +322,50 @@ def allocation_options(config):
             "min_keep_ratio": keep}
 
 
+ITERATIVE_KEYS = {"id", "stages", "steps", "checkpoints"}
+
+
+def iterative_options(config):
+    """Opt-in iterative candidates: uniform prune -> recover -> re-score -> prune -> recover ..."""
+    items = config.get("iterative")
+    if items is None:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list) or not items:
+        raise ValueError("iterative must be an object or a nonempty list of objects")
+    recovery = config.get("recovery", {})
+    for item in items:
+        if not isinstance(item, dict) or set(item) - ITERATIVE_KEYS or not {"id", "stages", "steps"} <= set(item):
+            raise ValueError(f"Each iterative candidate needs id, stages and steps (optional checkpoints): {item}")
+        stages, steps = item["stages"], item["steps"]
+        if (not isinstance(item["id"], str) or not item["id"] or not isinstance(stages, list) or len(stages) < 2
+                or any(isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 < t < 1 for t in stages)
+                or stages != sorted(set(stages))):
+            raise ValueError("iterative stages must be at least two strictly increasing fractions in (0, 1)")
+        if not isinstance(steps, list) or len(steps) != len(stages) or any(type(n) is not int or n < 1 for n in steps):
+            raise ValueError("iterative steps must give one positive integer update count per stage")
+        if sum(steps) != recovery.get("max_steps"):
+            raise ValueError(f"iterative steps {steps} must sum to recovery.max_steps ({recovery.get('max_steps')}): equal budget")
+        if any(recovery.get("warmup_steps", 0) >= n for n in steps):
+            raise ValueError("Every iterative stage needs more updates than recovery.warmup_steps")
+        checkpoints = item.get("checkpoints")
+        if checkpoints is not None and (not isinstance(checkpoints, list) or len(checkpoints) != len(stages) or any(
+                not isinstance(c, list) or not c or any(type(v) is not int or not 1 <= v <= n for v in c)
+                for c, n in zip(checkpoints, steps))):
+            raise ValueError("iterative checkpoints must be one list of update numbers within each stage")
+    return items
+
+
+def stage_checkpoints(spec, recovery, stage):
+    """Checkpoints of one stage: explicit, or the recipe's checkpoints scaled to the stage length."""
+    steps = spec["steps"][stage]
+    if spec.get("stage_checkpoints"):
+        return sorted(set(spec["stage_checkpoints"][stage]) | {steps})
+    total = recovery["max_steps"]
+    return sorted({max(1, round(c * steps / total)) for c in recovery.get("checkpoints", [])} | {steps})
+
+
 def _percent(target):
     return f"{round(100 * target):d}"
 
@@ -344,6 +389,10 @@ def candidate_specs(config):
             result += [{"id": f"uniform-{_percent(target)}", "target": target, "uniform": True, "control": True,
                         "selection_eligible": config.get("select_uniform", False)}
                        for target in config["targets"] if f"uniform-{_percent(target)}" != "uniform-10"]
+    for item in iterative_options(config):
+        result.append({"id": item["id"], "target": item["stages"][-1], "uniform": True, "control": False,
+                       "kind": "iterative", "stages": item["stages"], "steps": item["steps"],
+                       **({"stage_checkpoints": item["checkpoints"]} if item.get("checkpoints") else {})})
     ids = [spec["id"] for spec in result]
     if len(set(ids)) != len(ids):
         raise ValueError(f"Candidate names collide: {ids}")
@@ -441,6 +490,14 @@ def fit(config, output, state, splits):
                                          "seconds": time.perf_counter() - curve_start}
             allocations = []
             for spec in specs:
+                if spec.get("kind") == "iterative":
+                    stage_keeps = [allocate_neurons(model, scores, sensitivity, target, config["group_size"],
+                                                    config["min_keep_ratio"], True) for target in spec["stages"]]
+                    allocations.append(dict(spec, keep_indices=stage_keeps[0], oneshot_keep_indices=stage_keeps[-1],
+                                            stage_widths=[len(keep[0]) for keep in stage_keeps],
+                                            stage1_scores_sha256=_scores_sha256(scores),
+                                            original_widths=[m.down_proj.in_features for m in mlp_layers(model)]))
+                    continue
                 if spec["target"] == 0:
                     keep = {i: list(range(m.down_proj.in_features)) for i, m in enumerate(mlp_layers(model))}
                 elif spec.get("method") == "curve":
@@ -489,13 +546,17 @@ def fit(config, output, state, splits):
         start = time.perf_counter()
         model = tokenizer = None
         try:
-            model, tokenizer = _load(config)
-            _verify_source(config, model, baseline)
-            if spec["target"]:
-                compact_model(model, {int(k): v for k, v in spec["keep_indices"].items()})
+            final_keep = spec["keep_indices"]
+            if spec.get("kind") == "iterative":
+                model, tokenizer, recovered, final_keep = _iterative_recovery(config, splits, spec, baseline, selection_dev, directory)
+            else:
+                model, tokenizer = _load(config)
+                _verify_source(config, model, baseline)
+                if spec["target"]:
+                    compact_model(model, {int(k): v for k, v in spec["keep_indices"].items()})
+                batches = make_batches(splits["recovery"], tokenizer, config["max_length"])
+                recovered = recover_model(model, batches, lambda m: _evaluate(m, tokenizer, selection_dev, config), config["recovery"])
             parameters = count_parameters(model)
-            batches = make_batches(splits["recovery"], tokenizer, config["max_length"])
-            recovered = recover_model(model, batches, lambda m: _evaluate(m, tokenizer, selection_dev, config), config["recovery"])
             # Selection uses the actual merged weights, not an unmerged adapter's score.
             merged_dev = _evaluate(model, tokenizer, selection_dev if skip_merged else splits["dev"], config)
             if not _valid_metrics(merged_dev):
@@ -509,7 +570,7 @@ def fit(config, output, state, splits):
                       "dev": None if skip_merged else merged_dev, "recovery": recovered, "elapsed_seconds": time.perf_counter() - start,
                       "memory_after": memory_snapshot(next(model.parameters()).device), **_provenance(model)}
             manifest = {"config": config, "dataset": state["dataset"], "selection_split": "dev",
-                        "keep_indices": spec["keep_indices"], "candidate": record}
+                        "keep_indices": final_keep, "candidate": record}
             save_checkpoint(model, tokenizer, checkpoint, manifest)
             # Reopen the actual export before selection, with only one model resident.
             del model, tokenizer
@@ -539,7 +600,13 @@ def fit(config, output, state, splits):
             record["checkpoint_sha256"] = checkpoint_identity(checkpoint)
             record["elapsed_seconds"] = time.perf_counter() - start
             record["checkpoint_bytes"] = sum(p.stat().st_size for p in checkpoint.rglob("*") if p.is_file())
+            if spec.get("kind") == "iterative":
+                record["iterative"] = _iterative_summary(spec, final_keep, recovered)
             write_json(record_path, record)
+            if spec.get("kind") == "iterative":
+                # Intermediate stage exports only serve resume; the final export is verified above.
+                for weights in directory.glob("stage-*/checkpoint/*.safetensors"):
+                    weights.unlink()
             candidates.append(record)
         except Exception as exc:
             failed = {**{k: v for k, v in spec.items() if k != "keep_indices"}, "status": "failed",
@@ -565,6 +632,120 @@ def fit(config, output, state, splits):
     write_json(output / "selection.json", selection)
     write_json(output / "selection-lock.json", {"sha256": _fingerprint(selection)})
     return selection
+
+
+def _scores_sha256(scores):
+    digest = hashlib.sha256()
+    for i in sorted(scores):
+        digest.update(scores[i].detach().cpu().float().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _stage_seed(seed, stage):
+    """Stage-specific recovery seed derived from the candidate's recovery seed (stage counted from 1)."""
+    return int(hashlib.sha256(f"{seed}:iterative-stage-{stage}".encode()).hexdigest()[:8], 16)
+
+
+def _iterative_recovery(config, splits, spec, baseline, selection_dev, directory):
+    """Run every stage of an iterative candidate; returns the final merged model before export.
+
+    The data order is the recovery seed's one-epoch permutation (the order a one-shot candidate
+    with the same seed uses), split into consecutive per-stage slices so each example is seen once.
+    Stage k > 1 re-scores (Taylor, calibration) the merged stage k-1 model, keeps the highest-scoring
+    neurons per layer down to the stage's uniform width, and trains fresh adapters. Intermediate
+    stages are exported under ``stage-<k>/`` so a restart resumes after the last finished stage.
+    """
+    from .artifacts import save_checkpoint
+    from .modeling import mlp_layers
+    from .pruning import compact_model
+    from .recovery import recover_model
+    from .scoring import score_neurons
+    recovery = config["recovery"]
+    seed, accumulation = recovery["seed"], recovery["gradient_accumulation"]
+    widths = spec["stage_widths"]
+    model, tokenizer = _load(config)
+    _verify_source(config, model, baseline)
+    batches = make_batches(splits["recovery"], tokenizer, config["max_length"])
+    order = list(range(len(batches)))
+    random.Random(seed).shuffle(order)
+    needed = sum(spec["steps"]) * accumulation
+    if needed > len(order):
+        raise ValueError(f"Iterative stages need {needed} microbatches but recovery has {len(order)}")
+    keep = {int(k): v for k, v in spec["keep_indices"].items()}
+    stages, start_stage = [], 0
+    # Resume after the last finished intermediate stage whose export is intact.
+    for stage in range(len(spec["stages"]) - 1):
+        path = directory / f"stage-{stage + 1}" / "stage.json"
+        if not path.exists():
+            break
+        done = json.loads(path.read_text())
+        try:
+            identity_ok = checkpoint_identity(done["checkpoint"]) == done["checkpoint_sha256"]
+        except ValueError:
+            identity_ok = False
+        if not identity_ok:
+            break
+        stages.append(done)
+        start_stage = stage + 1
+    if start_stage:
+        del model
+        _release()
+        model, tokenizer = _load(config, stages[-1]["checkpoint"])
+        keep = {int(k): v for k, v in stages[-1]["keep_indices"].items()}
+    offset = sum(spec["steps"][:start_stage]) * accumulation
+    for stage in range(start_stage, len(spec["stages"])):
+        current = [m.down_proj.in_features for m in mlp_layers(model)]
+        scores_hash = spec["stage1_scores_sha256"]
+        if stage == 0:
+            compact_model(model, keep)
+        else:
+            calibration = make_batches(splits["calibration"], tokenizer, config["max_length"])
+            scores = score_neurons(model, calibration, "taylor")  # on the merged previous-stage model
+            scores_hash = _scores_sha256(scores)
+            local = {i: sorted(scores[i].argsort(stable=True)[current[i] - widths[stage]:].tolist()) for i in scores}
+            keep = {i: [keep[i][j] for j in local[i]] for i in local}
+            # A second compaction on purpose: indices are local to the stage-(k-1) widths here, and the
+            # config's provenance is rewritten to original indices right after.
+            model._prune_lab_compacted = False
+            model.config.prune_lab_compacted = False
+            compact_model(model, local)
+            model.config.prune_lab_keep_indices = [keep[i] for i in range(len(keep))]
+            model.config.prune_lab_original_widths = spec["original_widths"]
+        steps = spec["steps"][stage]
+        stage_order = order[offset:offset + steps * accumulation]
+        offset += steps * accumulation
+        recipe = dict(recovery, max_steps=steps, checkpoints=stage_checkpoints(spec, recovery, stage),
+                      seed=_stage_seed(seed, stage + 1), shuffle_batches=False)
+        print(f"Iterative {spec['id']} stage {stage + 1}/{len(spec['stages'])}: target {spec['stages'][stage]:.0%}, "
+              f"{steps} updates", flush=True)
+        result = recover_model(model, [batches[i] for i in stage_order], lambda m: _evaluate(m, tokenizer, selection_dev, config), recipe)
+        summary = {"stage": stage + 1, "target": spec["stages"][stage], "width": widths[stage], "updates": steps,
+                   "checkpoints": recipe["checkpoints"], "seed": recipe["seed"], "data_slice": [offset - steps * accumulation, offset],
+                   "data_keys_sha256": _fingerprint([splits["recovery"][i].key for i in stage_order]),
+                   "keep_indices": keep, "scores_sha256": scores_hash, "best_step": result["best_step"],
+                   "pre_recovery_selection_dev": result["initial_dev"], "recovery": result}
+        if stage < len(spec["stages"]) - 1:
+            stage_dir = directory / f"stage-{stage + 1}"
+            if stage_dir.exists():
+                shutil.rmtree(stage_dir)
+            checkpoint = stage_dir / "checkpoint"
+            save_checkpoint(model, tokenizer, checkpoint, {"config": config, "keep_indices": keep, "stage": summary})
+            summary.update(checkpoint=str(checkpoint), checkpoint_sha256=checkpoint_identity(checkpoint))
+            write_json(stage_dir / "stage.json", summary)
+        stages.append(summary)
+    return model, tokenizer, dict(stages[-1]["recovery"], stages=stages), keep
+
+
+def _iterative_summary(spec, final_keep, recovered):
+    oneshot = {int(k): set(v) for k, v in spec["oneshot_keep_indices"].items()}
+    final = {int(k): set(v) for k, v in final_keep.items()}
+    differ = {i: len(final[i] - oneshot[i]) for i in sorted(final)}
+    return {"stages": [{k: v for k, v in s.items() if k not in ("recovery", "keep_indices")} for s in recovered["stages"]],
+            "stage_keep_indices": [s["keep_indices"] for s in recovered["stages"]],
+            "final_widths": [len(final[i]) for i in sorted(final)],
+            "oneshot_widths": [len(oneshot[i]) for i in sorted(oneshot)],
+            "kept_neurons_differing_from_oneshot": sum(differ.values()), "per_layer_differing": differ,
+            "total_updates": sum(s["updates"] for s in recovered["stages"])}
 
 
 def _selection(output):
