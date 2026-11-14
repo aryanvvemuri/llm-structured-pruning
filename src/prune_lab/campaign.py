@@ -455,6 +455,8 @@ def fit(config, output, state, splits):
                 allocations.append(dict(spec, keep_indices=keep))
             if options is not None:
                 extra["allocation_options"] = options
+                # Per-neuron Taylor scores, so every mask can be recomputed from the record alone.
+                extra["taylor_scores"] = {i: scores[i].detach().cpu().tolist() for i in sorted(scores)}
                 extra["removal_fractions"] = {a["id"]: allocators.removal_fractions(scores, a["keep_indices"]) for a in allocations}
                 # Calibration loss right after pruning (masked, before any recovery), per candidate.
                 extra["calibration_loss_after_pruning"] = {

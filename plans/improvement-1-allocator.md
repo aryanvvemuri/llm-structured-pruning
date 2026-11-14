@@ -52,6 +52,9 @@ per-layer pruning costs a confident −2.11.
 
 **Uniform at 20%.** The campaign must be able to emit a uniform candidate for
 every target (today only `uniform-10` exists), so `uniform-20` is available.
+Uniform pruning moves all 24 layers by one 64-neuron group at a time, so
+`uniform-20` lands at 20.057% removed versus 19.988% for the other 20%
+candidates; this is accepted and parameter counts are reported.
 
 No value above is tuned. If a pilot is ever needed it may use calibration loss
 only, never dev or test.

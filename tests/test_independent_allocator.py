@@ -358,9 +358,9 @@ def test_matched_size_of_allocators_at_qwen_scale():
     assert abs(off['uniform-20']) <= 12
 
 
-@pytest.mark.xfail(strict=True, reason='Plan secondary check "all 20% candidates within one 64-neuron group of the '
-                   'target" fails for uniform-20 on Qwen2.5-0.5B: it removes 1.65 groups (~0.28M params) more than '
-                   'the target (20.057% vs curve/global/per-layer 19.988%), so uniform-20 is slightly smaller.')
+@pytest.mark.xfail(strict=True, reason='Accepted (inherent 24-group uniform step): uniform-20 removes 1.65 groups '
+                   '(~0.28M params) more than the target on Qwen2.5-0.5B (20.057% vs curve/global/per-layer 19.988%); '
+                   'parameter counts are reported. See plans/improvement-1-allocator.md.')
 def test_uniform_20_within_one_group_of_target_at_qwen_scale():
     assert abs(sizes_at_20(qwen_meta())['uniform-20']) <= 1
 
@@ -489,9 +489,6 @@ def test_allocation_record_contents_and_legacy_masks_identical(tiny_support, mon
     assert all(v >= 0 for v in new['removal_fractions']['uniform-20'])
 
 
-@pytest.mark.xfail(strict=True, reason='Verification gap: allocation.json records probes and curves but not the '
-                   'per-neuron Taylor scores, so the plan\'s verifier cannot recompute curve/global-std masks '
-                   '"from the recorded scores and curves".')
 def test_allocation_record_allows_recomputing_masks(tiny_support, monkeypatch):
     config, tmp = tiny_support
     record = allocation_only(dict(config, allocation={'methods': ['curve', 'global-standardized']}), tmp / 'r', monkeypatch)

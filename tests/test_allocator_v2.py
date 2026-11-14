@@ -128,3 +128,23 @@ def test_tiny_campaign_records_allocators(tmp_path, monkeypatch):
     for name in ('curve-15', 'global-std-15'):
         assert max(record['removal_fractions'][name]) <= .5
     assert all(c['status'] == 'complete' for c in campaign._selection(output)['candidates'])
+
+
+def test_masks_recompute_from_recorded_scores_and_curves(tmp_path, monkeypatch):
+    from test_multiseed import tiny_support_config
+    config = tiny_support_config(tmp_path, monkeypatch)
+    config.update(targets=[.15], allocation={'methods': ['legacy', 'curve', 'global-standardized']},
+                  train_candidates=['unpruned-recovery', 'curve-15', 'global-std-15'])
+    output = tmp_path / 'runs' / 'recompute'
+    campaign.run_campaign(config, output, 'preflight')
+    from prune_lab import recovery
+    monkeypatch.setattr(recovery, 'recover_model', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop after allocation')))
+    with pytest.raises(ValueError, match='recovery reference failed'):  # Only the allocation stage is needed here.
+        campaign.run_campaign(config, output, 'fit')
+    record = json.loads((output / 'allocation.json').read_text())
+    scores = {int(i): torch.tensor(v) for i, v in record['taylor_scores'].items()}
+    raw = {int(i): v for i, v in record['curve_probes']['raw'].items()}
+    model, _ = campaign._load(config)
+    specs = {c['id']: {int(k): v for k, v in c['keep_indices'].items()} for c in record['candidates']}
+    assert specs['curve-15'] == alloc.allocate_curve(model, scores, raw, .15, config['group_size'])
+    assert specs['global-std-15'] == alloc.allocate_global_standardized(model, scores, .15, config['group_size'])
