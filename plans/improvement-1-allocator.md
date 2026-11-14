@@ -88,6 +88,8 @@ allocator; calibration loss right after pruning (before recovery) for each
 allocator; matched size (all 20% candidates within one 64-neuron group of the
 target, parameter counts reported).
 
+**Combined run:** to save GPU time this experiment runs together with improvement 7 as one run, `runs/support-v2-allocator` (`configs/support-v2-allocator-iterative.json`, checkpoints kept), with the same candidates, settings and predeclared comparisons; `unpruned-recovery` and `uniform-20` are shared, and a test shows each candidate trains identically to the separate configs.
+
 ## Engineering constraints
 
 - Defaults unchanged: existing configs keep identical masks, fingerprints and

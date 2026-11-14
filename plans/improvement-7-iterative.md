@@ -62,6 +62,8 @@ Sanity: `unpruned-recovery` and `uniform-20` should reproduce the same
 candidates in `runs/support-v2-allocator` (report whether exactly or within
 numeric noise).
 
+**Combined run:** to save GPU time this experiment runs together with improvement 1 as one run, `runs/support-v2-allocator` (`configs/support-v2-allocator-iterative.json`, checkpoints kept), with the same candidates, settings and predeclared comparisons; `unpruned-recovery` and `uniform-20` are shared, and a test shows each candidate trains identically to the separate configs.
+
 ## Engineering constraints
 
 - Opt-in; existing configs, fingerprints, masks, runs unchanged.
