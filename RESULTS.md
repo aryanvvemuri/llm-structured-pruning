@@ -20,6 +20,42 @@ Per-layer 10% minus uniform 10% is −0.41 (bootstrap [−2.38, +1.67], seed t [
 
 An independent audit recomputed all 15,000 per-example F1/ROUGE-L values (zero mismatches), every mean, difference, interval and decision, parameter counts, mask identity across seeds, 150/150 merge-check agreement in all 20 cells, and confirmed no test-split evaluation exists. Independent tests: **222 passed, 1 expected failure** (documented: one v2 test prompt equals a v1 test prompt). Artifacts: `runs/support-v2-main/multi-seed-summary.json`, `multi-seed-report.md`; checkpoints were deleted after evaluation, per-example records retained.
 
+## Improvement 2a: longer recovery with a cosine schedule (accepted)
+
+Candidate `runs/support-v2-longer` (`configs/support-v2-longer.json`) against reference `runs/support-v2-main`. The new recipe trains for 450 optimizer updates instead of 50, which is one full pass over the 1,800 recovery examples. The rate warms up linearly over 20 updates, then follows a cosine from the 2e-4 peak down to 10% of it. Development checks run at updates 0/150/300/450. Data, pruning masks, evaluation settings and the five recovery seeds (20261114–20261118) are unchanged. Numbers are token F1 (0–100 word overlap, not correctness) on **dev-holdout**: the 450 development examples outside the 150-example checkpoint-selection subset. The test split remains sealed.
+
+| Variant | Reference mean F1 | 2a mean F1 | Difference | Decision | Seed sd: reference → 2a |
+| --- | ---: | ---: | ---: | --- | --- |
+| Uniform 10% (predeclared primary) | 47.05 | 54.32 | +7.26 | confident | 3.23 → 0.59 |
+| Recovery only | 48.72 | 54.89 | +6.16 | confident | 3.34 → 0.79 |
+| Per-layer 10% | 46.64 | 54.05 | +7.40 | confident | 2.11 → 1.05 |
+| Per-layer 20% | 46.10 | 52.78 | +6.68 | confident | 2.39 → 0.69 |
+
+The primary comparison, uniform 10% minus uniform 10% paired by seed, is +7.26. Its hierarchical bootstrap interval is [+4.07, +10.51] and its paired seed-level t interval is [+2.66, +11.87]. Both exclude zero, so the decision is "confident", and 2a is accepted. An unpaired Welch interval is about [+3.3, +11.3]. The other three variants are secondary comparisons, reported but not deciding.
+
+Within the 2a run, against recovery only:
+
+| Comparison | Difference | Decision |
+| --- | ---: | --- |
+| Uniform 10% | −0.57 | not established |
+| Per-layer 10% | −0.84 | not established |
+| Per-layer 20% | −2.11 | confident |
+| Per-layer 10% minus uniform 10% | −0.27 | not established |
+
+The allocator still shows no established advantage over uniform pruning.
+
+The selected checkpoint was update 300 in 7 of 20 variant-seed cells and update 450 in 13, never 0 or 150. Each candidate took about 9.4 minutes instead of 4.7, about 4 hours per 5-seed run.
+
+Limits:
+- **2a is a bundle.** It combines a full epoch, 9× more updates, warmup plus cosine decay, and one extra checkpoint, so the gain cannot be attributed to any single part.
+- **Pairing no longer helps.** Under the new recipe the seed-to-seed correlation between variants is about 0.14, so pairing by seed no longer removes much noise.
+- **The old detectability estimate does not carry over.** The roughly 4-point minimum detectable effect estimated from the baseline does not apply to comparisons against this run and should be re-estimated.
+- These are dev-holdout results only, and lexical F1 is not support correctness.
+
+An independent verifier recomputed all 30,000 per-example rows with 0 mismatches.
+
+**`runs/support-v2-longer` is now the reference run for later improvements.**
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.

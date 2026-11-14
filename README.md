@@ -154,6 +154,8 @@ The original-model baseline and every candidate's reported dev result are still 
 
 See `plans/improvement-2-recovery.md`. Every option lives under `recovery` and is absent by default, so existing configurations, fingerprints and training are unchanged.
 
+**Accepted: 2a.** On dev-holdout with 5 seeds, the predeclared uniform-10% comparison against `runs/support-v2-main` improved token F1 from 47.05 to 54.32 (+7.26; bootstrap [+4.07, +10.51], paired t [+2.66, +11.87]; confident). Seed sd fell from 2–3.3 to 0.6–1.05 points. The recipe is a bundle of changes, so the gain is not attributed to any single part, and training cost is about doubled. See RESULTS.md. `runs/support-v2-longer` with `configs/support-v2-longer.json` is now the reference for later improvements.
+
 - **2a, longer schedule** (`configs/support-v2-longer.json`): one full pass over the 1,800 recovery examples, with `max_steps: 450`, `checkpoints: [150, 300, 450]` and `lr_schedule: "cosine"`. The rate is linear warmup `(u+1)/warmup_steps` over 20 updates, then a cosine from the 2e-4 peak, reaching `min_lr_ratio` (10%) after the last update. The default `"constant"` never touches the optimizer's rate.
 - **Recorded recipe:** each candidate record stores `recovery.recipe`, the rate of every update (`learning_rates`), the rate in force at each assessed checkpoint, and `training_seconds`/`assessment_seconds`. `multi-seed compare` records both runs' recipes.
 - **Per-example losses** (`store_example_losses: true`, on in the improvement-2 configs): dev records gain per-example `answer_token_loss`/`answer_tokens`, so loss can be bootstrapped later. Nothing else in the record changes.
