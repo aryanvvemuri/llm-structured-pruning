@@ -53,6 +53,17 @@ def read_campaign_config(path=None):
 
 
 def _fingerprint(value):
+    """SHA-256 of the JSON form of ``value``, stable across a write/read round trip.
+
+    The value is normalised through JSON first, so integer dict keys hash as the strings they
+    become on disk (sorted as strings). Values without integer keys hash exactly as before.
+    """
+    normalised = json.loads(json.dumps(value, allow_nan=False))
+    return hashlib.sha256(json.dumps(normalised, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def legacy_fingerprint(value):
+    """The pre-fix fingerprint (no JSON normalisation), kept only to verify old locks."""
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
