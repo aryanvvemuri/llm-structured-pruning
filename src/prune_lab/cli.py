@@ -62,7 +62,10 @@ def run(args):
     if args.command == "quantize":
         from .quantize import quantize_run
         summary = quantize_run(args.source, args.output, args.variants, args.precisions, args.seeds,
-                               args.check_prompts, args.speed_examples, args.speed_repeats, args.discard_models)
+                               args.check_prompts, args.speed_examples, args.speed_repeats, args.discard_models,
+                               gate={"margin_tolerance": args.margin_tolerance,
+                                     "min_position_agreement": args.min_position_agreement,
+                                     "max_abs_difference": args.max_logit_difference})
         print(f"Quantized {len(summary)} seed(s) into {args.output}; aggregate with: prune-lab multi-seed aggregate --run {args.output}")
         return
     if args.command == "multi-seed":
@@ -184,6 +187,10 @@ def main(argv=None):
     quantize.add_argument("--speed-examples", type=int, default=32)
     quantize.add_argument("--speed-repeats", type=int, default=3)
     quantize.add_argument("--discard-models", action="store_true", help="Delete converted MLX weights after measuring them")
+    quantize.add_argument("--margin-tolerance", type=float, default=0.1,
+                          help="Logit gate: next-token argmax must agree only where the reference top-2 margin exceeds this")
+    quantize.add_argument("--min-position-agreement", type=float, default=0.97, help="Logit gate: pooled position argmax agreement")
+    quantize.add_argument("--max-logit-difference", type=float, default=2.0, help="Logit gate: max |logit difference|")
     multi = sub.add_parser("multi-seed", help="Repeat recovery over seeds (dev only by default) and aggregate with a seed x family bootstrap")
     actions = multi.add_subparsers(dest="action", required=True)
     seeds_run = actions.add_parser("run", help="Run preflight+fit for every recovery seed into OUTPUT/seed-<s>/")

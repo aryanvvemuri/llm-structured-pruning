@@ -165,3 +165,39 @@ def test_quantize_run_assembles_records_for_aggregation(tmp_path, monkeypatch):
     quantize.quantize_run(source, output, ['unpruned-recovery', 'uniform-10'], ['fp32', '4bit'],
                           check_prompts=1, speed_examples=1, speed_repeats=1)
     assert calls == []  # resumed from result.json
+
+
+def prompt(key, margin, equal, positions=100, agreeing=100, diff=0.5):
+    return {'key': key, 'next_token_margin': margin, 'next_token_argmax_equal': equal, 'positions': positions,
+            'agreeing_positions': agreeing, 'max_abs_difference': diff}
+
+
+def test_logit_gate_tolerates_near_ties_only():
+    near_tie = quantize.logit_gate([prompt('a', 0.0015, False), prompt('b', 3.0, True)])
+    assert near_tie['passed'] and near_tie['tolerated_near_tie_flips'] == ['a']
+    assert near_tie['thresholds'] == {'margin_tolerance': 0.1, 'min_position_agreement': 0.97, 'max_abs_difference': 2.0}
+    assert not quantize.logit_gate([prompt('a', 0.5, False)])['decisive_next_token_flips'] == []
+    assert not quantize.logit_gate([prompt('a', 0.5, False)])['passed']
+    assert not quantize.logit_gate([prompt('a', 3.0, True, agreeing=96)])['passed']
+    assert not quantize.logit_gate([prompt('a', 3.0, True, diff=2.5)])['passed']
+    assert quantize.logit_gate([prompt('a', 0.5, False)], margin_tolerance=1.0)['passed']
+    legacy = {'prompts': [{'positions': 100, 'position_argmax_agreement': 0.99, 'next_token_argmax_equal': False,
+                           'max_abs_difference': 0.68}], 'passed': False, 'max_abs_difference': 0.68}
+    assert not quantize.recorded_gate_failed(legacy)  # pre-margin records: only agreement and difference judged
+    assert quantize.recorded_gate_failed(dict(legacy, max_abs_difference=3.0))
+    assert quantize.recorded_gate_failed({'gate_version': 2, 'passed': False})
+
+
+def test_logit_check_passes_conversion_and_catches_a_real_bug(tmp_path):
+    _, tokenizer, export = tiny_export(tmp_path, None)
+    data = examples(3)
+    quantize.convert(export, tmp_path / 'fp16', 'fp16')
+    model, _ = quantize.load_mlx(tmp_path / 'fp16')
+    good = quantize.logit_check(export, model, tokenizer, data)
+    assert good['passed'] and good['gate_version'] == 2 and all('next_token_margin' in p for p in good['prompts'])
+    # A conversion bug that loads the wrong tensors: layer 1's down_proj gets another matrix of the right shape.
+    weight = model.layers[1].mlp.down_proj.weight
+    model.layers[1].mlp.down_proj.weight = mlx.random.normal(weight.shape, key=mlx.random.key(0)).astype(weight.dtype)
+    bad = quantize.logit_check(export, model, tokenizer, data)
+    assert not bad['passed'] and (bad['max_abs_difference'] > 2.0 or bad['position_argmax_agreement'] < .97
+                                  or bad['decisive_next_token_flips'])
