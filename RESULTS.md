@@ -271,12 +271,13 @@ On the secondary dev-full set, the primary difference is −2.03 and confident.
 **Finding.** Under this recipe the 1.5B model gives no gain over the 0.5B on this task, even unpruned. Pruning it therefore cannot beat the native 0.5B. At 50% removed it is still 1.57× the 0.5B's size and scores about 2 F1 lower: the direction is negative, though not established on holdout. The 1.5B tolerates pruning well, since removing half of its parameters costs about 1 F1. That does not help, because its starting point is no better. **Recommendation: use the native 0.5B.** The 1.5B code path (`configs/support-v2-1p5b.json`, `scripts/preflight_model.py`, `--allow-different-models`) is kept as working infrastructure.
 
 **Caveats**
-- **The recipe was tuned on the 0.5B** and not re-tuned for the 1.5B: same learning rate, updates and rank.
+- **The recipe was tuned on the 0.5B** and not re-tuned for the 1.5B: same learning rate, updates and rank. The 1.5B may be under-trained at 450 updates: all 5 unpruned runs, and 11 of the 15 trained 1.5B models, selected the last checkpoint. That could favour the 0.5B.
+- **F1 and answer loss disagree.** The unpruned 1.5B has lower dev answer loss than the 0.5B (0.942 against 1.031) but slightly lower F1, so the finding is about word overlap only.
 - **No size-matched point was run.** Uniform 50% is the deepest cut; MLP-only pruning cannot go below 676.7M parameters.
 - **One task and one dataset.**
 - **Cross-model comparisons use unpaired seeds.**
 
-**Cost.** The preflight measured 1.54 s per update and 11.2 GB peak MPS driver memory for the unpruned 1.5B. The whole 5-seed run took about 7.5 hours on this Mac.
+**Cost.** The preflight measured 1.54 s per update and 11.2 GB peak MPS driver memory for the unpruned 1.5B. In the full run the peak was 12.1–13.2 GB for unpruned and uniform-25 and about 11 GB for uniform-50. The whole 5-seed run took about 7.5 hours on this Mac.
 
 ## Relative baseline-retention mode
 
