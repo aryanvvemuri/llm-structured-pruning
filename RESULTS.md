@@ -196,7 +196,7 @@ Speed is MLX against MLX only; it is not comparable with the PyTorch-MPS timings
 
 **Caveats**
 - **Batching differs.** The PyTorch records used batch 16 with left padding, and MLX used batch 1. Between 576 and 591 of the 600 replies are identical per seed and variant.
-- **The logit gate was amended after the run.** The run exited with code 1 because the original gate failed on a single next-token argmax flip, for seed 20261118, uniform 20%, on one calibration prompt. That prompt is a near-tie: the fp32 top-2 margin is 0.0015, and PyTorch's own fp16 flips it too. MLX's maximum logit difference (0.683) matches PyTorch fp16 against fp32 (0.675). The exit code was a false positive of the gate, and all 30 results were written. The gate now ignores next-token flips where the reference margin is at most 0.1, and keeps the pooled position-agreement and maximum-difference thresholds.
+- **The logit gate was amended after the run.** The run exited with code 1 because the original gate failed on a single next-token argmax flip, for seed 20261118, uniform 20%, on one calibration prompt. That prompt is a near-tie: the fp32 top-2 margin is 0.0015, and PyTorch's own fp16 flips it too. MLX's maximum logit difference (0.683) matches PyTorch fp16 against fp32 (0.675). The exit code was a false positive of the gate, and all 30 results were written. The gate now ignores next-token flips where the reference margin is at most 0.1, and keeps the pooled position-agreement and maximum-difference thresholds. The gate is a smoke check against gross conversion errors: a subtle wrong-index bug in a weak layer can stay under its absolute limits. The real evidence that MLX reproduces PyTorch is the end-to-end dev F1 agreement above.
 
 ## Relative baseline-retention mode
 

@@ -281,6 +281,28 @@ def speed(model, tokenizer, examples, settings, repeats=3):
 
 
 GATE = {"margin_tolerance": 0.1, "min_position_agreement": 0.97, "max_abs_difference": 2.0}
+MAX_MARGIN_TOLERANCE = 10.0  # Logit units; a larger tolerance would effectively disable the flip check.
+
+
+def validate_gate(margin_tolerance=GATE["margin_tolerance"], min_position_agreement=GATE["min_position_agreement"],
+                  max_abs_difference=GATE["max_abs_difference"]):
+    values = (margin_tolerance, min_position_agreement, max_abs_difference)
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+        raise ValueError("Logit gate thresholds must be finite numbers")
+    if not 0 <= margin_tolerance <= MAX_MARGIN_TOLERANCE:
+        raise ValueError(f"margin_tolerance must be in [0, {MAX_MARGIN_TOLERANCE:g}]")
+    if not 0 < min_position_agreement <= 1:
+        raise ValueError("min_position_agreement must be in (0, 1]")
+    if not max_abs_difference > 0:
+        raise ValueError("max_abs_difference must be positive")
+    return {"margin_tolerance": float(margin_tolerance), "min_position_agreement": float(min_position_agreement),
+            "max_abs_difference": float(max_abs_difference)}
+
+
+def _worst(values):
+    """Maximum that propagates NaN (Python's max() silently drops a NaN that is not first)."""
+    values = [float(v) for v in values]
+    return math.nan if any(math.isnan(v) for v in values) else max(values)
 
 
 def logit_gate(prompts, margin_tolerance=GATE["margin_tolerance"], min_position_agreement=GATE["min_position_agreement"],
@@ -288,24 +310,29 @@ def logit_gate(prompts, margin_tolerance=GATE["margin_tolerance"], min_position_
     """Margin-aware agreement gate for converted logits.
 
     A next-token argmax flip fails only where the reference top-2 margin exceeds
-    ``margin_tolerance`` (near-ties flip under any fp16 arithmetic, PyTorch's included); pooled
-    argmax agreement over all checked positions must be at least ``min_position_agreement``; the
-    maximum absolute logit difference must be at most ``max_abs_difference``.
+    ``margin_tolerance`` (near-ties flip under any fp16 arithmetic, PyTorch's included); a flip with
+    a non-finite margin always fails. Pooled argmax agreement over all checked positions must be at
+    least ``min_position_agreement``; the maximum absolute logit difference must be finite and at
+    most ``max_abs_difference``. Any NaN fails the gate.
     """
+    thresholds = validate_gate(margin_tolerance, min_position_agreement, max_abs_difference)
+    margin_tolerance = thresholds["margin_tolerance"]
     positions = sum(p["positions"] for p in prompts)
     agreeing = sum(p["agreeing_positions"] for p in prompts)
-    decisive = [p for p in prompts if p["next_token_margin"] > margin_tolerance]
-    flips = [p["key"] for p in decisive if not p["next_token_argmax_equal"]]
-    tolerated = [p["key"] for p in prompts if not p["next_token_argmax_equal"] and p["next_token_margin"] <= margin_tolerance]
+    tolerable = lambda p: math.isfinite(p["next_token_margin"]) and p["next_token_margin"] <= margin_tolerance
+    flips = [p["key"] for p in prompts if not p["next_token_argmax_equal"] and not tolerable(p)]
+    tolerated = [p["key"] for p in prompts if not p["next_token_argmax_equal"] and tolerable(p)]
     agreement = agreeing / positions if positions else 0.0
-    largest = max(p["max_abs_difference"] for p in prompts)
-    passed = bool(prompts) and not flips and agreement >= min_position_agreement and largest <= max_abs_difference
+    largest = _worst(p["max_abs_difference"] for p in prompts) if prompts else math.nan
+    margins_finite = all(math.isfinite(p["next_token_margin"]) or p["next_token_argmax_equal"] for p in prompts)
+    passed = (bool(prompts) and not flips and margins_finite and math.isfinite(agreement)
+              and agreement >= thresholds["min_position_agreement"]
+              and math.isfinite(largest) and largest <= thresholds["max_abs_difference"])
     return {"passed": passed, "decisive_next_token_flips": flips, "tolerated_near_tie_flips": tolerated,
-            "position_argmax_agreement": agreement, "max_abs_difference": largest,
-            "thresholds": {"margin_tolerance": margin_tolerance, "min_position_agreement": min_position_agreement,
-                           "max_abs_difference": max_abs_difference},
-            "rule": "Next-token argmax must agree where the reference top-2 margin exceeds margin_tolerance; pooled "
-                    "position argmax agreement >= min_position_agreement; max |logit difference| <= max_abs_difference."}
+            "position_argmax_agreement": agreement, "max_abs_difference": largest, "thresholds": thresholds,
+            "rule": "Next-token argmax must agree where the reference top-2 margin exceeds margin_tolerance (a flip "
+                    "with a non-finite margin always fails); pooled position argmax agreement >= min_position_agreement; "
+                    "max |logit difference| finite and <= max_abs_difference; any NaN fails."}
 
 
 def logit_check(source, model, tokenizer, examples, device="cpu", **thresholds):
@@ -334,16 +361,52 @@ def logit_check(source, model, tokenizer, examples, device="cpu", **thresholds):
     return {"prompts": results, "gate_version": 2, **logit_gate(results, **thresholds)}
 
 
+def legacy_needs_recheck(check):
+    """A pre-v2 record with a next-token flip: its margin was not recorded, so the flip cannot be judged."""
+    return bool(check) and check.get("gate_version") != 2 and any(not p["next_token_argmax_equal"] for p in check["prompts"])
+
+
 def recorded_gate_failed(check):
-    """Gate outcome of a stored check; checks written before gate version 2 lack margins, so their
-    next-token flips cannot be judged and only the position and difference thresholds are applied."""
+    """Gate outcome of a stored check.
+
+    Gate-v2 checks use their stored outcome. Checks written before gate version 2 lack margins: one
+    with a next-token flip fails here (it must be re-checked; ``quantize_run`` does so when the
+    converted weights still exist), and one without flips is judged on pooled agreement and the
+    maximum difference, where any NaN fails.
+    """
     if not check:
         return False
     if check.get("gate_version") == 2:
         return not check["passed"]
+    if legacy_needs_recheck(check):
+        return True
     prompts = check["prompts"]
-    agreement = sum(p["position_argmax_agreement"] * p["positions"] for p in prompts) / sum(p["positions"] for p in prompts)
-    return agreement < GATE["min_position_agreement"] or check["max_abs_difference"] > GATE["max_abs_difference"]
+    positions = sum(p["positions"] for p in prompts)
+    agreement = sum(p["position_argmax_agreement"] * p["positions"] for p in prompts) / positions if positions else math.nan
+    largest = _worst([check.get("max_abs_difference", math.nan)] + [p["max_abs_difference"] for p in prompts])
+    return not (math.isfinite(agreement) and agreement >= GATE["min_position_agreement"]
+                and math.isfinite(largest) and largest <= GATE["max_abs_difference"])
+
+
+def _overrides(gate):
+    """Only non-default thresholds are passed on; logit_check's defaults are the GATE values."""
+    return {k: v for k, v in gate.items() if v != GATE[k]}
+
+
+def _recheck_legacy(done, directory, export, tokenizer, examples, device, gate, result_path):
+    """Re-run the logit check of a pre-v2 result that had a next-token flip, if its weights still exist."""
+    model_dir = directory / "model"
+    if not list(model_dir.glob("*.safetensors")):
+        print(f"WARNING: {directory.name}: legacy logit check has a next-token flip without a recorded margin and the "
+              "converted weights were deleted; it needs a re-check (re-run without --discard-models)", flush=True)
+        return dict(done, logit_check=dict(done["logit_check"], needs_recheck=True))
+    model, _ = load_mlx(model_dir)
+    check = logit_check(export, model, tokenizer, examples, device, **_overrides(gate))
+    del model
+    updated = dict(done, logit_check=check, legacy_logit_check=done["logit_check"])
+    write_json(result_path, updated)
+    print(f"Re-checked {directory.name} with the margin-aware gate: {'passed' if check['passed'] else 'FAILED'}", flush=True)
+    return updated
 
 
 def _seed_directories(source, seeds):
@@ -369,6 +432,9 @@ def quantize_run(source, output, variants, precisions, seeds=None, check_prompts
     variants plus the PyTorch source records as ``<variant>-pytorch``, so ``multi-seed aggregate`` and
     ``compare`` work unchanged. Only dev is evaluated; the test split is never read.
     """
+    if isinstance(check_prompts, bool) or not isinstance(check_prompts, int) or check_prompts < 1:
+        raise ValueError("check_prompts must be a positive integer: the logit check cannot be disabled")
+    gate = validate_gate(**(gate or {}))
     from .campaign import _fingerprint, _selection, checkpoint_identity, read_campaign_config
     from .data import validate_splits
     from .modeling import load_model  # noqa: F401  (fails early if the PyTorch stack is broken)
@@ -423,6 +489,9 @@ def quantize_run(source, output, variants, precisions, seeds=None, check_prompts
                     shutil.rmtree(directory)
                 if result_path.exists():
                     done = json.loads(result_path.read_text())
+                    if precision in ("fp32", "fp16") and legacy_needs_recheck(done.get("logit_check")):
+                        done = _recheck_legacy(done, directory, export, tokenizer, calibration[:check_prompts],
+                                               check_device, gate, result_path)
                     if precision in ("fp32", "fp16") and recorded_gate_failed(done.get("logit_check")):
                         failures.append(f"{seed_dir.name}/{name}")
                     candidates.append(done)
@@ -434,8 +503,7 @@ def quantize_run(source, output, variants, precisions, seeds=None, check_prompts
                     shutil.rmtree(model_dir)  # An interrupted conversion is redone from scratch.
                 conversion = convert(export, model_dir, precision)
                 model, _ = load_mlx(model_dir)
-                check = logit_check(export, model, tokenizer, calibration[:check_prompts], check_device,
-                                    **(gate or {})) if check_prompts else None
+                check = logit_check(export, model, tokenizer, calibration[:check_prompts], check_device, **_overrides(gate))
                 if precision in ("fp32", "fp16") and check is not None and not check["passed"]:
                     # Recorded and reported at the end rather than aborting a long multi-seed job.
                     failures.append(f"{seed_dir.name}/{name}")

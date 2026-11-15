@@ -165,6 +165,25 @@ def test_quantize_run_assembles_records_for_aggregation(tmp_path, monkeypatch):
     quantize.quantize_run(source, output, ['unpruned-recovery', 'uniform-10'], ['fp32', '4bit'],
                           check_prompts=1, speed_examples=1, speed_repeats=1)
     assert calls == []  # resumed from result.json
+    # A pre-v2 record with a next-token flip and no margin is re-checked from its weights on resume.
+    path = seed / 'uniform-10-fp32' / 'result.json'
+    record = json.loads(path.read_text())
+    legacy = {'prompts': [{k: v for k, v in pr.items() if k not in ('agreeing_positions', 'next_token_margin')}
+                          | {'next_token_argmax_equal': False} for pr in record['logit_check']['prompts']],
+              'passed': False, 'max_abs_difference': record['logit_check']['max_abs_difference']}
+    path.write_text(json.dumps(dict(record, logit_check=legacy)))
+    quantize.quantize_run(source, output, ['uniform-10'], ['fp32'], check_prompts=1, speed_examples=1, speed_repeats=1)
+    rechecked = json.loads(path.read_text())
+    assert rechecked['logit_check']['gate_version'] == 2 and rechecked['logit_check']['passed']
+    assert rechecked['legacy_logit_check'] == legacy
+    # Without the converted weights it cannot be re-checked and the run fails instead of accepting it.
+    path.write_text(json.dumps(dict(record, logit_check=legacy)))
+    for weights in (seed / 'uniform-10-fp32' / 'model').glob('*.safetensors'):
+        weights.unlink()
+    with pytest.raises(ValueError, match='logit check failed'):
+        quantize.quantize_run(source, output, ['uniform-10'], ['fp32'], check_prompts=1, speed_examples=1, speed_repeats=1)
+    with pytest.raises(ValueError, match='check_prompts'):
+        quantize.quantize_run(source, output, ['uniform-10'], ['fp32'], check_prompts=0)
 
 
 def prompt(key, margin, equal, positions=100, agreeing=100, diff=0.5):
@@ -183,8 +202,10 @@ def test_logit_gate_tolerates_near_ties_only():
     assert quantize.logit_gate([prompt('a', 0.5, False)], margin_tolerance=1.0)['passed']
     legacy = {'prompts': [{'positions': 100, 'position_argmax_agreement': 0.99, 'next_token_argmax_equal': False,
                            'max_abs_difference': 0.68}], 'passed': False, 'max_abs_difference': 0.68}
-    assert not quantize.recorded_gate_failed(legacy)  # pre-margin records: only agreement and difference judged
-    assert quantize.recorded_gate_failed(dict(legacy, max_abs_difference=3.0))
+    assert quantize.recorded_gate_failed(legacy) and quantize.legacy_needs_recheck(legacy)  # flip without margin
+    no_flip = {'prompts': [dict(legacy['prompts'][0], next_token_argmax_equal=True)], 'max_abs_difference': 0.68}
+    assert not quantize.recorded_gate_failed(no_flip)  # pre-margin, no flip: agreement and difference only
+    assert quantize.recorded_gate_failed(dict(no_flip, max_abs_difference=3.0))
     assert quantize.recorded_gate_failed({'gate_version': 2, 'passed': False})
 
 

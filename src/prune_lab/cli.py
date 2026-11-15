@@ -168,6 +168,24 @@ def run_multi_seed(args):
         print(output.with_suffix(".md"))
 
 
+def _positive_int(text):
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _bounded_float(low, high, description, open_low=False):
+    import math
+
+    def parse(text):
+        value = float(text)
+        if not math.isfinite(value) or value > high or value < low or (open_low and value == low):
+            raise argparse.ArgumentTypeError(f"must be {description}")
+        return value
+    return parse
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -183,14 +201,14 @@ def main(argv=None):
     quantize.add_argument("--variants", nargs="+", required=True)
     quantize.add_argument("--precisions", nargs="+", default=["fp16", "8bit", "4bit"], choices=["fp32", "fp16", "8bit", "4bit"])
     quantize.add_argument("--seeds", type=int, nargs="+")
-    quantize.add_argument("--check-prompts", type=int, default=4, help="Calibration prompts for the MLX-vs-PyTorch logit check")
+    quantize.add_argument("--check-prompts", type=_positive_int, default=4, help="Calibration prompts for the MLX-vs-PyTorch logit check")
     quantize.add_argument("--speed-examples", type=int, default=32)
     quantize.add_argument("--speed-repeats", type=int, default=3)
     quantize.add_argument("--discard-models", action="store_true", help="Delete converted MLX weights after measuring them")
-    quantize.add_argument("--margin-tolerance", type=float, default=0.1,
+    quantize.add_argument("--margin-tolerance", type=_bounded_float(0.0, 10.0, "a finite number in [0, 10]"), default=0.1,
                           help="Logit gate: next-token argmax must agree only where the reference top-2 margin exceeds this")
-    quantize.add_argument("--min-position-agreement", type=float, default=0.97, help="Logit gate: pooled position argmax agreement")
-    quantize.add_argument("--max-logit-difference", type=float, default=2.0, help="Logit gate: max |logit difference|")
+    quantize.add_argument("--min-position-agreement", type=_bounded_float(0.0, 1.0, "a number in (0, 1]", open_low=True), default=0.97, help="Logit gate: pooled position argmax agreement")
+    quantize.add_argument("--max-logit-difference", type=_bounded_float(0.0, float("inf"), "a finite positive number", open_low=True), default=2.0, help="Logit gate: max |logit difference|")
     multi = sub.add_parser("multi-seed", help="Repeat recovery over seeds (dev only by default) and aggregate with a seed x family bootstrap")
     actions = multi.add_subparsers(dest="action", required=True)
     seeds_run = actions.add_parser("run", help="Run preflight+fit for every recovery seed into OUTPUT/seed-<s>/")
