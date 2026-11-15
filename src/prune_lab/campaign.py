@@ -52,7 +52,13 @@ def read_campaign_config(path=None):
 
 
 def _fingerprint(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    """SHA-256 of the JSON form of ``value``, stable across a write/read round trip.
+
+    The value is normalised through JSON first, so integer dict keys hash as the strings they
+    become on disk (sorted as strings). Values without integer keys hash exactly as before.
+    """
+    normalised = json.loads(json.dumps(value, allow_nan=False))
+    return hashlib.sha256(json.dumps(normalised, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
 def validate_config(config):
@@ -95,6 +101,19 @@ def validate_config(config):
         raise ValueError("store_example_losses must be true or false")
     from .recipes import validate_recipe
     validate_recipe(config["recovery"])
+    if not isinstance(config.get("uniform_per_target", False), bool):
+        raise ValueError("uniform_per_target must be true or false")
+    if config.get("uniform_per_target") and not config["include_controls"]:
+        raise ValueError("uniform_per_target needs include_controls")
+    chosen = config.get("train_candidates")
+    if chosen is not None:
+        if not isinstance(chosen, list) or not chosen or any(not isinstance(c, str) for c in chosen) or len(set(chosen)) != len(chosen):
+            raise ValueError("train_candidates must be a nonempty list of distinct candidate names")
+        reference = config.get("selection_reference", "original")
+        if reference != "original" and reference not in chosen:
+            raise ValueError(f"train_candidates must include the selection reference {reference}")
+    if not candidate_specs(config):  # Also validates names and train_candidates.
+        raise ValueError("No candidates to train")
 
 
 def selection_dev_subset(dev, count, seed):
@@ -270,13 +289,32 @@ def preflight(config, output, splits):
         _release()
 
 
+def _percent(target):
+    return f"{round(100 * target):d}"
+
+
 def candidate_specs(config):
+    """Per-layer candidates per target plus controls; ``uniform_per_target`` adds ``uniform-<pct>``
+    for every target and ``train_candidates`` restricts which candidates are allocated and trained."""
     result = [{"id": f"per-layer-{i:02d}", "target": target, "uniform": False, "control": False}
               for i, target in enumerate(config["targets"], 1)]
     if config["include_controls"]:
         result += [{"id": "unpruned-recovery", "target": 0.0, "uniform": False, "control": True},
                    {"id": "uniform-10", "target": 0.10, "uniform": True, "control": True,
                     "selection_eligible": config.get("select_uniform", False)}]
+        if config.get("uniform_per_target", False):
+            result += [{"id": f"uniform-{_percent(target)}", "target": target, "uniform": True, "control": True,
+                        "selection_eligible": config.get("select_uniform", False)}
+                       for target in config["targets"] if f"uniform-{_percent(target)}" != "uniform-10"]
+    ids = [spec["id"] for spec in result]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"Candidate names collide: {ids}")
+    chosen = config.get("train_candidates")
+    if chosen is not None:
+        unknown = sorted(set(chosen) - set(ids))
+        if unknown:
+            raise ValueError(f"train_candidates not produced by this configuration: {unknown}; available {ids}")
+        result = [spec for spec in result if spec["id"] in chosen]
     return result
 
 

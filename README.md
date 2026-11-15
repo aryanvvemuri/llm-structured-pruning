@@ -31,6 +31,8 @@ Each candidate starts from the original model, physically removes gate/up rows a
 
 The campaign also trains an unpruned control and a uniform 10% pruning control with the same recovery budget. Each export is reloaded and evaluated on development data before selection. The smallest qualifying per-layer candidate is selected for each of three tolerances: **0, 5, and 10 percentage points** below the original development accuracy. For example, 80% becomes floors of 80%, 75% and 70%. Controls are excluded from this selection. Several tiers may select the same checkpoint, and a tier can have no qualifying pruned model. Matching observed accuracy is not proof of equivalent accuracy on unseen problems.
 
+Two opt-in campaign options control which candidates exist: `uniform_per_target: true` adds a uniform control `uniform-<pct>` for every target (besides `uniform-10`), and `train_candidates: [...]` restricts allocation and training to the listed names (it must include the selection reference). Without them the candidate list is unchanged.
+
 ### Select by retained baseline quality
 
 New campaigns can instead ask for the **smallest tested model retaining at least 95% of a baseline score**. Add these fields to the campaign configuration:
