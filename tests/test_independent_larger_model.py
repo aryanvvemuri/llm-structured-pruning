@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HUB = Path('/Users/aryan/llm_pruning_optimization/.cache/huggingface/hub')
 SCRIPT = ROOT / 'scripts' / 'preflight_model.py'
 GIT_ENV = dict(os.environ, DEVELOPER_DIR='/Library/Developer/CommandLineTools')
-PARENT = '3fa7cb3'  # improve/1-allocator tip this branch was cut from
+PARENT = '8c740c9'  # land/4-quantization tip this branch sits on (was improve/1-allocator 3fa7cb3 on improve/5)
 
 
 def test_worktree_package_is_under_test():
