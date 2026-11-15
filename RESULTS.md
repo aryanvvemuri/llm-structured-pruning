@@ -93,6 +93,68 @@ Caveats:
 
 These longer runs exposed growing MPS allocator caching: peak driver memory reached about 18 GB with a teacher on the 24 GB machine. Recovery now empties the MPS cache after every update and after each assessment, which brings the peak to 8.2 GB with bit-identical training losses.
 
+## Improvements 1 and 7: allocator and iterative pruning at 20% (rejected)
+
+Both ran in one run, `runs/support-v2-allocator`: 5 seeds, the 2a recipe, 20% pruning. Numbers are token F1 on dev-holdout, paired by seed, and the test split remains sealed. An independent verifier recomputed all 21,000 per-example scores with 0 mismatches.
+
+| Variant | Parameters | Mean F1 (seed sd) |
+| --- | ---: | ---: |
+| Original Qwen | 494,032,768 | 22.05 |
+| Recovery only | 494,032,768 | 54.89 (0.79) |
+| Uniform 20% | 394,942,336 (20.057% removed) | 53.29 (1.33) |
+| Per-layer 20%, legacy allocator | 395,286,400 (19.988%) | 52.78 (0.69) |
+| Curve allocator, 20% (1a) | 395,286,400 (19.988%) | 54.58 (0.52) |
+| Global-standardized, 20% (1b) | 395,286,400 (19.988%) | 53.40 (0.77) |
+| Iterative 10%→20% | 394,942,336 (20.057%) | 52.48 (0.31) |
+
+### Improvement 1: curve and global-standardized allocators, rejected (not established, suggestive)
+
+The predeclared primary comparison is curve-20 minus uniform-20: **+1.29**. The bootstrap interval is [−0.23, +2.84] and the seed t interval is [+0.12, +2.46], so the decision is "not established". The per-seed differences were +0.39, +0.53, +1.98, +2.56 and +0.99. The gain is consistent across seeds but not shown across document families (families-only interval [+0.07, +2.50]); the minimum detectable effect is about 2.2 F1.
+
+Secondary comparisons, reported but not deciding:
+
+| Comparison | Difference | Decision |
+| --- | ---: | --- |
+| Curve − per-layer legacy | +1.80 (bootstrap [+0.59, +3.01], t [+1.36, +2.24]) | confident |
+| Curve − recovery only | −0.31 | not established |
+| Curve − global-standardized | +1.18 | not established (only t excludes 0) |
+| Global-standardized − uniform | +0.11 | not established |
+| Per-layer legacy − uniform | −0.51 | not established |
+| Per-layer legacy − recovery only | −2.11 | confident |
+| Uniform − recovery only | −1.60 | not established |
+
+**Removal patterns**
+- **Uniform:** 0.316 of every layer's neurons.
+- **Legacy:** 0.632 in 9 layers, 0.618 in 2, and 0 in 13.
+- **Curve:** 0.5 in 12 layers, 0.25 in 3, about 0.1 in 3, and 0 in 6.
+- **Global-standardized:** 0 to 0.421, sparing the last layers.
+
+The sensitivity probes were dominated by noise: 33 of the 72 raw values were negative, mostly within ±0.03. Calibration loss right after pruning, before recovery, was:
+
+| Allocator | Calibration loss (baseline 1.7833) |
+| --- | ---: |
+| Curve | 1.7865 (in-sample: the curve was fitted on this data) |
+| Uniform | 1.8067 |
+| Global-standardized | 1.8713 |
+| Legacy | 2.0481 |
+
+**Conclusion:** do not claim that the curve allocator beats uniform. The legacy per-layer allocator on `main` is the worst option at 20%, so **use uniform allocation**. Adding seeds to this run would be optional stopping. A legitimate retest is a fresh predeclared run, ideally with more development families. The code is on branch `experiment/1-allocator`.
+
+### Improvement 7: iterative pruning, rejected (no benefit)
+
+The schedule had two stages, 10% then 20%, with 225 + 225 updates. Stage 2 re-scored the merged stage-1 model, and the final widths equal uniform-20's.
+
+The primary comparison, iter-20 minus uniform-20, is **−0.81**, with bootstrap [−2.53, +1.05] and t [−2.71, +1.09]. Per-seed differences were −1.76, −2.14, +0.49, +1.19 and −1.82; the minimum detectable effect is about 2.8 F1. Against recovery only, iter-20 is −2.41 (bootstrap [−4.03, −0.82], t [−3.47, −1.34]), confident.
+
+About 9% of kept neurons differ from the one-shot mask (overlap 0.906–0.911). The stage-2 checkpoint choice was erratic: steps 75, 75, 150 and 225, and step 0 for seed 20261118, which discarded its stage-2 training. The code is on branch `experiment/7-iterative`.
+
+### Run notes
+
+- **Reproduction:** recovery only and per-layer legacy reproduce `runs/support-v2-longer` byte for byte in all 5 seeds.
+- **Resume:** the run was stopped and resumed once, inside iter-20's stage 2 for seed 20261115. The replay reproduced the interrupted steps exactly.
+- **Lock fix:** a lock-fingerprint bug with integer dict keys was fixed. The 5 selection locks were rewritten only after verifying that no selection content had changed.
+- **Unexplained slowdown:** global-standardized trained about 40% slower, with about 9.5 GB peak memory; the cause was not found.
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.

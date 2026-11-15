@@ -33,6 +33,8 @@ The campaign also trains an unpruned control and a uniform 10% pruning control w
 
 Two opt-in campaign options control which candidates exist: `uniform_per_target: true` adds a uniform control `uniform-<pct>` for every target (besides `uniform-10`), and `train_candidates: [...]` restricts allocation and training to the listed names (it must include the selection reference). Without them the candidate list is unchanged.
 
+**Allocation advice (5 seeds, 20% pruning, dev-holdout):** use uniform allocation. The legacy per-layer allocator was the worst option, 0.51 F1 below uniform and 2.11 below recovery only (confident). Two candidate replacements did not establish a gain over uniform: a curve-based allocator (+1.29, consistent across seeds but not across document families) and a FLAP-style global-standardized one (+0.11). Iterative 10%→20% pruning was 0.81 below one-shot uniform. Both are rejected; see RESULTS.md and branches `experiment/1-allocator` and `experiment/7-iterative`.
+
 ### Select by retained baseline quality
 
 New campaigns can instead ask for the **smallest tested model retaining at least 95% of a baseline score**. Add these fields to the campaign configuration:
