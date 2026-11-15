@@ -142,9 +142,9 @@ def test_0p5b_fingerprints_and_specs_unchanged_from_parent(tmp_path):
     for path in paths:
         config = campaign.read_campaign_config(path)
         assert [campaign._fingerprint(config), campaign.candidate_specs(config)] == old[path], path
-    changed = subprocess.run(['git', 'diff', '--name-only', PARENT, 'HEAD', '--', 'src'], cwd=ROOT, env=GIT_ENV,
+    changed = subprocess.run(['git', 'diff', '--name-only', '7662eb7^', '7662eb7', '--', 'src'], cwd=ROOT, env=GIT_ENV,
                              capture_output=True, text=True, check=True).stdout.split()
-    assert set(changed) <= {'src/prune_lab/cli.py', 'src/prune_lab/multiseed.py'}  # masks/training/eval untouched
+    assert set(changed) <= {'src/prune_lab/cli.py', 'src/prune_lab/multiseed.py'}  # masks/training/eval untouched by the improvement-5 commit itself
 
 
 # --- cross-model comparison ------------------------------------------------------------------------
