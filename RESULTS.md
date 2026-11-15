@@ -246,6 +246,38 @@ What would actually work is keeping every token of the deployment's document col
 
 The code is on branch `experiment/6-vocabulary`.
 
+## Improvement 5: pruned Qwen2.5-1.5B against native 0.5B (no gain; 0.5B recommended)
+
+Run `runs/support-v2-1p5b` (`configs/support-v2-1p5b.json`) used the 2a recipe and v2 data with `Qwen/Qwen2.5-1.5B-Instruct`, 5 seeds. Numbers are token F1 on dev-holdout (450 examples), and the test split remains sealed. The reference is recovered unpruned 0.5B from `runs/support-v2-longer`. The two runs use different base models, so cross-model comparisons resample seeds independently and use Welch t (`--allow-different-models --unpaired-seeds`).
+
+| Model | Parameters | F1 mean ± seed sd |
+| --- | ---: | ---: |
+| 0.5B recovery only (reference) | 494,032,768 | 54.89 ± 0.79 |
+| 1.5B original (no training) | 1,543,714,304 | 27.59 |
+| 1.5B recovery only | 1,543,714,304 | 53.92 ± 0.36 |
+| 1.5B uniform 25% | 1,155,610,112 | 53.58 ± 0.27 |
+| 1.5B uniform 50% | 775,763,456 | 52.89 ± 1.00 |
+
+| Comparison | Difference | Bootstrap 95% | Seed t 95% | Decision |
+| --- | ---: | --- | --- | --- |
+| 1.5B uniform 50% − 0.5B recovery only (predeclared primary) | −2.00 | [−4.16, +0.10] | [−3.33, −0.67] | not established |
+| 1.5B uniform 25% − 0.5B recovery only | −1.31 | [−3.21, +0.68] | [−2.28, −0.34] | not established |
+| 1.5B recovery only − 0.5B recovery only | −0.97 | [−3.01, +1.08] | [−1.94, +0.00] | not established |
+| 1.5B uniform 25% − 1.5B recovery only | −0.34 | [−1.66, +1.04] | [−0.75, +0.07] | not established |
+| 1.5B uniform 50% − 1.5B recovery only | −1.03 | [−2.83, +0.86] | [−1.96, −0.10] | not established |
+
+On the secondary dev-full set, the primary difference is −2.03 and confident.
+
+**Finding.** Under this recipe the 1.5B model gives no gain over the 0.5B on this task, even unpruned. Pruning it therefore cannot beat the native 0.5B. At 50% removed it is still 1.57× the 0.5B's size and scores about 2 F1 lower: the direction is negative, though not established on holdout. The 1.5B tolerates pruning well, since removing half of its parameters costs about 1 F1. That does not help, because its starting point is no better. **Recommendation: use the native 0.5B.** The 1.5B code path (`configs/support-v2-1p5b.json`, `scripts/preflight_model.py`, `--allow-different-models`) is kept as working infrastructure.
+
+**Caveats**
+- **The recipe was tuned on the 0.5B** and not re-tuned for the 1.5B: same learning rate, updates and rank.
+- **No size-matched point was run.** Uniform 50% is the deepest cut; MLP-only pruning cannot go below 676.7M parameters.
+- **One task and one dataset.**
+- **Cross-model comparisons use unpaired seeds.**
+
+**Cost.** The preflight measured 1.54 s per update and 11.2 GB peak MPS driver memory for the unpruned 1.5B. The whole 5-seed run took about 7.5 hours on this Mac.
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.

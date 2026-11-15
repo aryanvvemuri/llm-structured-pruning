@@ -188,6 +188,8 @@ HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab quantize --source runs/support-v2
 
 ### Improvement 5: pruned Qwen2.5-1.5B against native 0.5B
 
+**Outcome: no gain; use the native 0.5B.** On dev-holdout over 5 seeds, recovered 1.5B scores 53.92 against the 0.5B's 54.89, even unpruned. Uniform 50% pruning (775.8M parameters, 1.57× the 0.5B) scores 52.89, a difference of −2.00 that is not established. The 1.5B tolerates pruning well (−1.03 F1 at 50%), but it starts no better. The recipe was not re-tuned for the 1.5B; see RESULTS.md. The configuration, preflight script and cross-model compare remain as infrastructure.
+
 See `plans/improvement-5-larger-model.md`. `configs/support-v2-1p5b.json` is the 2a recipe and v2 data with `Qwen/Qwen2.5-1.5B-Instruct`. It trains `unpruned-recovery`, `uniform-25` and `uniform-50`; the tokenizer is byte-identical to 0.5B's. The recipe values are the 0.5B ones, fixed in advance and not tuned for 1.5B.
 
 Exact sizes: original 1,543,714,304 parameters, `uniform-25` 1,155,610,112 (25.14% removed), and `uniform-50` 775,763,456 (49.75%). MLP-only pruning with a 25% floor removes at most 867,041,280 (56.17%), leaving 676,673,024. That is still 37% larger than the 494,032,768-parameter 0.5B model, so a size-matched comparison is impossible here.
