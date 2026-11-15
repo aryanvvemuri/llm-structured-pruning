@@ -184,6 +184,8 @@ HF_HUB_OFFLINE=1 .venv/bin/python -m prune_lab quantize --source runs/support-v2
 .venv/bin/python -m prune_lab multi-seed aggregate --run runs/support-v2-quant
 ```
 
+**Vocabulary trimming (improvement 6) was rejected.** Trimming the embedding to the 7,764 tokens of the training splits matched 20% MLP pruning (+0.03 F1, not established). It cost 1.57 F1 against the untrimmed model, because replies copy document words whose tokens were removed. See RESULTS.md and branch `experiment/6-vocabulary`.
+
 ## Original uniform pruning experiment
 
 ```sh

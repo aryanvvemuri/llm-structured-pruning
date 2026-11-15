@@ -198,6 +198,54 @@ Speed is MLX against MLX only; it is not comparable with the PyTorch-MPS timings
 - **Batching differs.** The PyTorch records used batch 16 with left padding, and MLX used batch 1. Between 576 and 591 of the 600 replies are identical per seed and variant.
 - **The logit gate was amended after the run.** The run exited with code 1 because the original gate failed on a single next-token argmax flip, for seed 20261118, uniform 20%, on one calibration prompt. That prompt is a near-tie: the fp32 top-2 margin is 0.0015, and PyTorch's own fp16 flips it too. MLX's maximum logit difference (0.683) matches PyTorch fp16 against fp32 (0.675). The exit code was a false positive of the gate, and all 30 results were written. The gate now ignores next-token flips where the reference margin is at most 0.1, and keeps the pooled position-agreement and maximum-difference thresholds. The gate is a smoke check against gross conversion errors: a subtle wrong-index bug in a weak layer can stay under its absolute limits. The real evidence that MLX reproduces PyTorch is the end-to-end dev F1 agreement above.
 
+## Improvement 6: vocabulary trimming (rejected)
+
+Run `runs/support-v2-vocab` trimmed the vocabulary of the `unpruned-recovery` and `uniform-20` exports of `runs/support-v2-allocator`, 5 seeds, with no training. Numbers are dev-holdout token F1, mean ± seed sd, paired by seed. The test split remains sealed. An independent verifier recomputed all 12,000 per-example rows with 0 mismatches.
+
+The kept set has 7,764 of 151,936 rows. It was built only from the recovery and calibration splits, plus special, added and all 256 byte tokens. 966 token ids used in dev fall outside it.
+
+| Variant | Parameters | F1 |
+| --- | ---: | ---: |
+| Recovery only | 494,032,768 | 54.89 ± 0.79 |
+| Uniform 20% | 394,942,336 | 53.29 ± 1.33 |
+| Trimmed recovery only (`vocab-unpruned`) | 364,854,656 | 53.32 ± 0.77 |
+| Trimmed uniform 20% (`vocab-uniform-20`) | 265,764,224 | 51.97 ± 1.14 |
+
+The predeclared primary comparison is `vocab-unpruned` minus `uniform-20`: **+0.03**, bootstrap [−1.86, +2.00], t [−2.04, +2.10], not established. **Rejected:** trimming matches 20% MLP pruning at 7.6% fewer parameters, but is not confidently better.
+
+| Secondary comparison | Difference | Bootstrap 95% | Seed t 95% | Decision |
+| --- | ---: | --- | --- | --- |
+| Trimmed recovery only − recovery only | −1.57 | [−2.42, −0.73] | [−2.11, −1.02] | confident (the plan expected about 0) |
+| Trimmed uniform 20% − uniform 20% | −1.32 | [−2.19, −0.51] | [−1.90, −0.75] | confident |
+| Trimmed uniform 20% − recovery only | −2.92 | [−4.93, −0.99] | [−4.88, −0.96] | confident |
+
+**Where the cost comes from.** The 450 holdout examples split by two questions: does the prompt need the fallback, and did the original reply use a removed token?
+
+| Group | Examples | Identical replies | ΔF1 | Contribution to the mean |
+| --- | ---: | ---: | ---: | ---: |
+| A: neither | 112 | 100% | 0.00 | 0.00 |
+| B: reply only | 13 | | +0.01 | |
+| C: prompt only | 185 | 70% | +0.18 | +0.08 |
+| D: both | 140 | 11% | −5.29 | −1.64 |
+
+- **Exactness holds:** group A's replies are 100% identical, so there is no remapping or padding bug.
+- **Split prompts alone are harmless:** group C slightly gains.
+- **The whole cost is in group D:** replies that copy document words whose tokens were trimmed. 81% of the removed tokens used in those replies appear in the prompt. The dev documents come from families absent from recovery and calibration, and the trimmed model reproduced only 36% of such words.
+
+Fallback statistics: 1.62% of dev prompt tokens need the fallback, affecting 73.8% of dev examples; 2.61% of reference tokens (in 223 examples) cannot be emitted as one token. Answer loss is not comparable between trimmed and untrimmed models: the softmax over 7,764 tokens lowers it, and re-split references raise it.
+
+**Characterised only, not tuned:**
+- Also keeping all ids below 30,000 would cover 59% of the removed-token uses and still save 107.4M parameters (against 129.2M now).
+- Keeping all ids below 50,000 would cover 78% and save 90.4M.
+
+What would actually work is keeping every token of the deployment's document collection. That is a domain-coverage limitation, not something the training splits can supply.
+
+**Caveats**
+- Trimmed exports are usable only through `load_trimmed`/`TrimmedTokenizer`.
+- The recorded exactness check covered only 4 calibration prompts; exactness on dev rests on group A.
+
+The code is on branch `experiment/6-vocabulary`.
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.
