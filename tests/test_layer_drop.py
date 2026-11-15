@@ -78,7 +78,7 @@ def test_without_layers_restores_and_greedy_matches_brute_force():
 
 def test_ties_break_toward_higher_layer(monkeypatch):
     model = tiny(4)
-    monkeypatch.setattr(layerdrop, 'calibration_loss', lambda m, b: 1.0)
+    monkeypatch.setattr(layerdrop, 'calibration_loss', lambda m, b, per_example=False: (1.0, [1.0, 1.0]) if per_example else 1.0)
     assert layerdrop.scan_and_select(model, batches(), 2)['order'] == [3, 2]
 
 
@@ -116,7 +116,7 @@ def test_shape_validation_and_defaults():
     assert all('kind' not in s for s in campaign.candidate_specs(plain))
     real = campaign.read_campaign_config('configs/support-v2-layer-drop.json')
     campaign.validate_config(real)
-    assert [s['id'] for s in campaign.candidate_specs(real)] == ['unpruned-recovery', 'layers-7', 'layers-3-uniform-20']
+    assert [s['id'] for s in campaign.candidate_specs(real)] == ['unpruned-recovery', 'layers-3', 'layers-3-uniform-20', 'layers-7']
     longer = campaign.read_campaign_config('configs/support-v2-longer.json')
     assert {k: v for k, v in real.items() if k not in ('layer_drop', 'train_candidates')} == longer
 
@@ -164,3 +164,58 @@ def test_layer_drop_campaign_records_order_resume_and_aggregate(layer_run, monke
     again = {c['id']: c for c in campaign._selection(seed)['candidates']}['layers-1-uniform-40']
     assert [p.read_bytes() for p in sorted(Path(again['checkpoint']).glob('*.safetensors'))] == weights
     assert 'layers-2' in multiseed.aggregate_run(root, samples=10)['variants']
+
+
+def test_noise_check_fields_match_a_hand_computation():
+    import math, statistics
+    model = tiny(5)
+    data = batches(4)
+    scan = layerdrop.scan_and_select(model, data, 2)
+    removed = []
+    for step in scan['greedy']:
+        per = {}
+        for layer in [i for i in range(5) if i not in removed]:
+            with layerdrop.without_layers(model, removed + [layer]):
+                per[layer] = layerdrop.calibration_loss(model, data, per_example=True)
+        chosen, runner = step['removed_layer'], step['runner_up_layer']
+        assert runner != chosen and per[runner][0] >= per[chosen][0]
+        assert step['gap'] == per[runner][0] - per[chosen][0] and step['runner_up_loss'] == per[runner][0]
+        diffs = [a - b for a, b in zip(per[runner][1], per[chosen][1])]
+        se = statistics.stdev(diffs) / math.sqrt(len(diffs))
+        assert step['paired_standard_error'] == pytest.approx(se)
+        assert step['distinguishable'] == (step['gap'] >= 2 * se)
+        removed.append(chosen)
+    assert scan['order'] == removed and json.loads(json.dumps(scan)) == scan
+
+
+def test_candidates_share_the_greedy_prefix(layer_run_shared):
+    allocation = layer_run_shared
+    specs = {c['id']: c for c in allocation['candidates']}
+    order = allocation['layer_scan']['order']
+    assert specs['layers-1']['dropped_layers'] == specs['layers-1-uniform-40']['dropped_layers'] == sorted(order[:1])
+    assert specs['layers-2']['dropped_layers'] == sorted(order[:2]) and len(order) == 2
+
+
+@pytest.fixture
+def layer_run_shared(tmp_path, monkeypatch):
+    config = tiny_support_config(tmp_path, monkeypatch)
+    torch.manual_seed(5)
+    Qwen2ForCausalLM(Qwen2Config(vocab_size=5, hidden_size=16, intermediate_size=24, num_hidden_layers=4, num_attention_heads=2,
+                                 num_key_value_heads=1, max_position_embeddings=256, pad_token_id=0,
+                                 eos_token_id=2)).save_pretrained(config['model'], safe_serialization=True)
+    config.update(layer_drop={'candidates': [{'id': 'layers-1', 'drop': 1}, {'id': 'layers-1-uniform-40', 'drop': 1, 'total_target': .4},
+                                             {'id': 'layers-2', 'drop': 2}]},
+                  train_candidates=['unpruned-recovery', 'layers-1', 'layers-1-uniform-40', 'layers-2'])
+    calls = []
+    real = layerdrop.scan_and_select
+    monkeypatch.setattr(layerdrop, 'scan_and_select', lambda *a, **k: calls.append(a[2]) or real(*a, **k))
+    from prune_lab import recovery
+    monkeypatch.setattr(recovery, 'recover_model', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('stop')))
+    output = tmp_path / 'runs' / 'shared'
+    output.mkdir(parents=True)
+    state, splits = campaign._initialize(config, output)
+    (output / 'preflight.json').write_text('{}')
+    with pytest.raises(ValueError):  # every candidate's recovery is stubbed to fail; allocation is what is tested
+        campaign.fit(config, output, state, splits)
+    assert calls == [2]  # one scan for all candidates, run to the deepest drop
+    return json.loads((output / 'allocation.json').read_text())

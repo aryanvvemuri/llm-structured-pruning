@@ -147,12 +147,16 @@ def without_layers(model, dropped):
             model.config.layer_types = layer_types
 
 
-def calibration_loss(model, batches):
-    """Token-weighted answer-token cross entropy over ``batches`` (no gradients, eval mode)."""
+def calibration_loss(model, batches, per_example=False):
+    """Token-weighted answer-token cross entropy over ``batches`` (no gradients, eval mode).
+
+    With ``per_example`` also returns each example's mean answer-token loss.
+    """
     import torch
     device = next(model.parameters()).device
     training = [(m, m.training) for m in model.modules()]
     total = tokens = 0.0
+    examples = []
     try:
         model.eval()
         with torch.no_grad():
@@ -170,10 +174,20 @@ def calibration_loss(model, batches):
                     raise ValueError("Nonfinite calibration loss in the layer scan")
                 total += value * n
                 tokens += n
+                examples.append(value)
     finally:
         for module, mode in training:
             module.training = mode
-    return total / tokens
+    return (total / tokens, examples) if per_example else total / tokens
+
+
+def paired_standard_error(first, second):
+    """Standard error of the mean per-example difference ``first - second`` (paired by example)."""
+    import statistics
+    differences = [a - b for a, b in zip(first, second)]
+    if len(differences) < 2 or len(first) != len(second):
+        return math.nan
+    return statistics.stdev(differences) / math.sqrt(len(differences))
 
 
 def scan_and_select(model, batches, steps):
@@ -191,16 +205,28 @@ def scan_and_select(model, batches, steps):
     removed, greedy, single = [], [], None
     for step in range(steps):
         remaining = [i for i in range(layers) if i not in removed]
-        losses = []
+        losses, per_example = [], []
         for layer in remaining:
             with without_layers(model, removed + [layer]):
-                losses.append(calibration_loss(model, batches))
+                loss, examples = calibration_loss(model, batches, per_example=True)
+            losses.append(loss)
+            per_example.append(examples)
         if step == 0:
             single = [{"layer": layer, "loss": loss, "increase": loss - baseline} for layer, loss in zip(remaining, losses)]
-        best = min(range(len(remaining)), key=lambda k: (losses[k], -remaining[k]))
+        ranked = sorted(range(len(remaining)), key=lambda k: (losses[k], -remaining[k]))
+        best, runner = ranked[0], ranked[1]
         removed.append(remaining[best])
+        # Noise check (does not affect the choice): is the chosen layer distinguishable from the runner-up?
+        gap = losses[runner] - losses[best]
+        error = paired_standard_error(per_example[runner], per_example[best])
         greedy.append({"step": step + 1, "removed_layer": remaining[best], "loss": losses[best],
-                       "increase": losses[best] - baseline, "evaluated": len(remaining)})
+                       "increase": losses[best] - baseline, "evaluated": len(remaining),
+                       "runner_up_layer": remaining[runner], "runner_up_loss": losses[runner], "gap": gap,
+                       "paired_standard_error": error if math.isfinite(error) else None,  # None: fewer than 2 examples
+                       "distinguishable": bool(math.isfinite(error) and gap >= 2 * error)})
     return {"examples": len(batches), "baseline_loss": baseline, "single_layer": single, "greedy": greedy,
             "order": removed, "seconds": time.perf_counter() - start,
-            "note": "Calibration split only; original pretrained model; ties broken toward the higher layer index."}
+            "note": "Calibration split only; original pretrained model; ties broken toward the higher layer index.",
+            "noise_check": "gap = runner-up loss - chosen loss (token-weighted means); paired_standard_error = standard error "
+                           "of the per-example (mean answer-token loss) difference runner-up - chosen over the calibration "
+                           "examples; distinguishable = gap >= 2 standard errors. It does not change the selection."}

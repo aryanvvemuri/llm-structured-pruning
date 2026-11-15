@@ -55,19 +55,24 @@
     "examples": 150,
     "candidates": [
       {
-        "id": "layers-7",
-        "drop": 7
+        "id": "layers-3",
+        "drop": 3
       },
       {
         "id": "layers-3-uniform-20",
         "drop": 3,
         "total_target": 0.2
+      },
+      {
+        "id": "layers-7",
+        "drop": 7
       }
     ]
   },
   "train_candidates": [
     "unpruned-recovery",
-    "layers-7",
-    "layers-3-uniform-20"
+    "layers-3",
+    "layers-3-uniform-20",
+    "layers-7"
   ]
 }

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HUB = Path('/Users/aryan/llm_pruning_optimization/.cache/huggingface/hub')
 SCRIPT = ROOT / 'scripts' / 'preflight_model.py'
 GIT_ENV = dict(os.environ, DEVELOPER_DIR='/Library/Developer/CommandLineTools')
+IMPROVEMENT_TIP = '01b8da2'  # last improvement-5 code commit; later improvements change src on purpose
 PARENT = '8c740c9'  # land/4-quantization tip this branch sits on (was improve/1-allocator 3fa7cb3 on improve/5)
 
 
@@ -142,7 +143,7 @@ def test_0p5b_fingerprints_and_specs_unchanged_from_parent(tmp_path):
     for path in paths:
         config = campaign.read_campaign_config(path)
         assert [campaign._fingerprint(config), campaign.candidate_specs(config)] == old[path], path
-    changed = subprocess.run(['git', 'diff', '--name-only', PARENT, 'HEAD', '--', 'src'], cwd=ROOT, env=GIT_ENV,
+    changed = subprocess.run(['git', 'diff', '--name-only', PARENT, IMPROVEMENT_TIP, '--', 'src'], cwd=ROOT, env=GIT_ENV,
                              capture_output=True, text=True, check=True).stdout.split()
     assert set(changed) <= {'src/prune_lab/cli.py', 'src/prune_lab/multiseed.py'}  # masks/training/eval untouched
 
