@@ -238,7 +238,7 @@ def test_planned_sizes_at_real_shape():
         pytest.skip(f'meta compaction unsupported: {exc}')
     assert count_parameters(three) == 395_105_536
     config = campaign.read_campaign_config(ROOT / 'configs' / 'support-v2-layer-drop.json')
-    assert layerdrop.check_shape(config, model) == {'layers-7': {'layers': 24, 'drop': 7},
+    assert layerdrop.check_shape(config, model) == {'layers-3': {'layers': 24, 'drop': 3}, 'layers-7': {'layers': 24, 'drop': 7},
                                                     'layers-3-uniform-20': {'layers': 24, 'drop': 3}}
 
 
@@ -549,9 +549,10 @@ def test_shipped_config_matches_plan():
     longer = json.loads((ROOT / 'configs' / 'support-v2-longer.json').read_text())
     extra = set(raw) - set(longer)
     assert {k: v for k, v in raw.items() if k not in extra} == longer or extra <= {'layer_drop', 'train_candidates', 'uniform_per_target'}
-    assert raw['layer_drop'] == {'examples': 150, 'candidates': [{'id': 'layers-7', 'drop': 7},
-                                                                 {'id': 'layers-3-uniform-20', 'drop': 3, 'total_target': 0.2}]}
-    assert raw['train_candidates'] == ['unpruned-recovery', 'layers-7', 'layers-3-uniform-20']
+    assert raw['layer_drop'] == {'examples': 150, 'candidates': [{'id': 'layers-3', 'drop': 3},
+                                                                 {'id': 'layers-3-uniform-20', 'drop': 3, 'total_target': 0.2},
+                                                                 {'id': 'layers-7', 'drop': 7}]}  # revised plan (4c63ccd)
+    assert raw['train_candidates'] == ['unpruned-recovery', 'layers-3', 'layers-3-uniform-20', 'layers-7']
     assert raw['recovery'] == longer['recovery']
     config = campaign.read_campaign_config(ROOT / 'configs' / 'support-v2-layer-drop.json')
-    assert [s['id'] for s in campaign.candidate_specs(config)] == ['unpruned-recovery', 'layers-7', 'layers-3-uniform-20']
+    assert [s['id'] for s in campaign.candidate_specs(config)] == ['unpruned-recovery', 'layers-3', 'layers-3-uniform-20', 'layers-7']
