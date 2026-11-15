@@ -196,6 +196,16 @@ Exact sizes: original 1,543,714,304 parameters, `uniform-25` 1,155,610,112 (25.1
 
 `multi-seed compare` refuses runs of different base models unless `--allow-different-models` is given; seeds are then unpaired by default. `scripts/preflight_model.py` measures seconds per update and per reply, and peak MPS driver memory, on recovery data only. It also applies the plan's seed-count rule.
 
+### Improvement 8: layer dropping (opt-in, under evaluation)
+
+See `plans/improvement-8-layer-drop.md`. Configure it with a `layer_drop` block, for example `{"examples": 150, "candidates": [{"id": "layers-7", "drop": 7}, {"id": "layers-3-uniform-20", "drop": 3, "total_target": 0.2}]}`.
+
+- **Scan and selection:** the allocation stage scans single-layer removals on the original model, measuring calibration loss only. It then greedily removes, k times, the layer whose removal gives the lowest loss in the already-reduced network, breaking ties toward the higher index. The scan and order go into `allocation.json` and `layer-scan.json`.
+- **Physical removal:** dropped layers are removed from the model, and `num_hidden_layers`, `layer_types` and `layer_idx` are renumbered. A `layers-N` export loads with the stock Hugging Face class.
+- **Combined candidates:** `total_target` re-scores Taylor importance on the reduced network, then prunes MLPs uniformly so the *total* reduction against the original model reaches the target, using the uniform candidates' nearest-step rounding. Recovery is one pass on the final shape.
+
+On Qwen2.5-0.5B, `layers-7` has 389,646,080 parameters (21.13% removed) and `layers-3-uniform-20` has 395,105,536 (20.02%; MLP width 3904 in 21 layers). `configs/support-v2-layer-drop.json` trains `unpruned-recovery`, `layers-7` and `layers-3-uniform-20` with the 2a recipe.
+
 ## Original uniform pruning experiment
 
 ```sh
