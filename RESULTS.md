@@ -155,6 +155,49 @@ About 9% of kept neurons differ from the one-shot mask (overlap 0.906–0.911). 
 - **Lock fix:** a lock-fingerprint bug with integer dict keys was fixed. The 5 selection locks were rewritten only after verifying that no selection content had changed.
 - **Unexplained slowdown:** global-standardized trained about 40% slower, with about 9.5 GB peak memory; the cause was not found.
 
+## Improvement 4: quantization baselines (infrastructure, verified)
+
+Run `runs/support-v2-quant` converted the `unpruned-recovery` and `uniform-20` exports of `runs/support-v2-allocator` for all 5 seeds. The tools were MLX 0.32.4 and mlx-lm 0.29.1, with affine group quantization at group size 64. Numbers are dev-holdout token F1, mean ± seed sd, and comparisons are paired by seed. The test split remains sealed. An independent verifier recomputed all 24,000 per-example rows with 0 mismatches.
+
+| Variant | PyTorch fp32 | MLX fp16 | MLX 8-bit | MLX 4-bit |
+| --- | ---: | ---: | ---: | ---: |
+| Recovery only: F1 | 54.89 ± 0.79 | 54.81 ± 0.77 | 54.91 ± 0.65 | 50.52 ± 1.62 |
+| Recovery only: weight MB on disk | 1,976 | 988.1 | 525.0 | 278.1 |
+| Uniform 20%: F1 | 53.29 ± 1.33 | 53.20 ± 1.32 | 53.30 ± 1.36 | 48.62 ± 1.29 |
+| Uniform 20%: weight MB on disk | 1,580 | 789.9 | 419.8 | 222.3 |
+
+Bits per weight are 16.000, 8.501 and 4.502. All 169 Linear and Embedding modules are quantized, including the tied embedding: 136M parameters, 27.5% of the model, which pruning never touches.
+
+| Comparison (b − a) | Difference | Bootstrap 95% | Seed t 95% | Decision |
+| --- | ---: | --- | --- | --- |
+| fp16 − PyTorch, recovery only | −0.08 | [−0.22, +0.01] | [−0.14, −0.02] | not established |
+| fp16 − PyTorch, uniform 20% | −0.09 | [−0.35, +0.11] | [−0.33, +0.15] | not established |
+| 8-bit − fp16 (both variants) | +0.10 | | | not established |
+| 4-bit − fp16, recovery only | −4.29 | [−6.27, −2.38] | [−5.79, −2.80] | confident |
+| 4-bit − fp16, uniform 20% | −4.59 | | | confident |
+| Uniform 20% fp16 − recovery only fp16 | −1.61 | [−3.59, +0.28] | | not established |
+| Uniform 20% 4-bit − recovery only 4-bit | −1.90 | [−4.22, +0.41] | | not established |
+| Uniform 20% 4-bit − recovery only fp16 | −6.19 | [−8.12, −4.30] | [−7.74, −4.65] | confident |
+| Recovery only 8-bit − uniform 20% fp16 | +1.71 | | | not established |
+| Recovery only 4-bit − uniform 20% 8-bit | −2.78 | [−5.36, −0.20] | [−5.89, +0.33] | not established |
+
+| Variant | Median tokens/s (range), fp16 / 8-bit / 4-bit | Peak MLX memory GB, fp16 / 8-bit / 4-bit |
+| --- | --- | --- |
+| Recovery only | 188 (167–190) / 199 (160–220) / 277 (237–283) | 1.73–1.89 / 1.27–1.48 / 1.07–1.26 |
+| Uniform 20% | 217 (165–218) / 229 (204–254) / 289 (224–304) | 1.58–1.68 / 1.18–1.30 / 1.01–1.13 |
+
+Speed is MLX against MLX only; it is not comparable with the PyTorch-MPS timings elsewhere.
+
+**Reading**
+- **The size/F1 frontier** is, in order of size: recovery only 8-bit (525 MB, 54.91), uniform 20% 8-bit (420 MB, 53.30), recovery only 4-bit (278 MB, 50.52) and uniform 20% 4-bit (222 MB, 48.62).
+- **8-bit beats 20% pruning on both size and quality.** It is 34% smaller than the pruned fp16 model and not worse.
+- **4-bit is costly here,** a confident 4.3–4.6 F1 on this task.
+- **Pruning is only worth considering on top of quantization.** There it saves about 20% of the bytes for −1.6 to −1.9 F1, a cost that is not established.
+
+**Caveats**
+- **Batching differs.** The PyTorch records used batch 16 with left padding, and MLX used batch 1. Between 576 and 591 of the 600 replies are identical per seed and variant.
+- **The logit gate was amended after the run.** The run exited with code 1 because the original gate failed on a single next-token argmax flip, for seed 20261118, uniform 20%, on one calibration prompt. That prompt is a near-tie: the fp32 top-2 margin is 0.0015, and PyTorch's own fp16 flips it too. MLX's maximum logit difference (0.683) matches PyTorch fp16 against fp32 (0.675). The exit code was a false positive of the gate, and all 30 results were written. The gate now ignores next-token flips where the reference margin is at most 0.1, and keeps the pooled position-agreement and maximum-difference thresholds.
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.

@@ -168,6 +168,8 @@ See `plans/improvement-2-recovery.md`. Every option lives under `recovery` and i
 
 ### Improvement 4: 4-bit quantization baselines (MLX, optional)
 
+Verified on 5 seeds; see RESULTS.md. 8-bit MLX keeps dev-holdout F1 (54.91 against PyTorch 54.89) at 525 MB, so it beats 20% pruning on both size and quality. 4-bit costs a confident 4.3–4.6 F1. Install the optional extra with `uv pip install --python .venv/bin/python -e '.[quantize]'`, which pins `mlx-lm==0.29.1`. Then run `prune-lab quantize --source <run with kept exports> --output <dir> --variants ...`.
+
 See `plans/improvement-4-quantization.md`. `prune-lab quantize` needs the optional `mlx-lm` package. Install it with `uv pip install --python .venv/bin/python 'mlx-lm==0.29.1'`; newer mlx-lm requires transformers 5. `prune_lab` still imports without it.
 
 - **Conversion:** float32 exports become MLX `fp16`, `8bit` or `4bit` (mlx-lm affine group quantization, group size 64). Per-layer MLP widths come from `prune_lab_layer_widths`.
