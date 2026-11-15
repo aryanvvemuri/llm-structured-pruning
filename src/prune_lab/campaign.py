@@ -291,6 +291,9 @@ def preflight(config, output, splits):
         _release()
 
 
+RESERVED_NAMES = ("original", "unpruned-recovery")
+
+
 def _percent(target):
     return f"{round(100 * target):d}"
 
@@ -316,6 +319,11 @@ def candidate_specs(config):
                        "control": False, "kind": "layer-drop", "drop": item["drop"],
                        **({"total_target": total} if total is not None else {})})
     ids = [spec["id"] for spec in result]
+    # Names the aggregation uses for the original-model baseline and the unpruned control.
+    for spec in result:
+        if spec["id"] in RESERVED_NAMES and not (spec["id"] == "unpruned-recovery" and spec.get("control")
+                                                 and spec["target"] == 0.0 and "kind" not in spec):
+            raise ValueError(f"Candidate name {spec['id']!r} is reserved")
     if len(set(ids)) != len(ids):
         raise ValueError(f"Candidate names collide: {ids}")
     chosen = config.get("train_candidates")

@@ -532,9 +532,6 @@ def test_invalid_layer_drop_configs_fail_before_any_work(base, bad):
     assert not (tmp / 'never').exists() or not any((tmp / 'never').iterdir())
 
 
-@pytest.mark.xfail(strict=True, reason='Edge case: a layer_drop candidate may be named "original"; collect_run then '
-                   'overwrites the original-model baseline variant with that candidate, silently corrupting every '
-                   'comparison against "original". The name is not reserved (pre-existing for other kinds too).')
 def test_reserved_name_original_rejected(base):
     config, _ = base
     broken = json.loads(json.dumps(config))

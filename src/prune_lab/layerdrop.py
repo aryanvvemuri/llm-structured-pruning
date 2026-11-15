@@ -216,17 +216,21 @@ def scan_and_select(model, batches, steps):
         ranked = sorted(range(len(remaining)), key=lambda k: (losses[k], -remaining[k]))
         best, runner = ranked[0], ranked[1]
         removed.append(remaining[best])
-        # Noise check (does not affect the choice): is the chosen layer distinguishable from the runner-up?
-        gap = losses[runner] - losses[best]
+        # Noise check (does not affect the choice, which uses the token-weighted losses): gap and its
+        # standard error both come from the per-example mean answer-token losses, runner-up - chosen.
+        differences = [a - b for a, b in zip(per_example[runner], per_example[best])]
+        gap = sum(differences) / len(differences)
         error = paired_standard_error(per_example[runner], per_example[best])
         greedy.append({"step": step + 1, "removed_layer": remaining[best], "loss": losses[best],
                        "increase": losses[best] - baseline, "evaluated": len(remaining),
                        "runner_up_layer": remaining[runner], "runner_up_loss": losses[runner], "gap": gap,
                        "paired_standard_error": error if math.isfinite(error) else None,  # None: fewer than 2 examples
-                       "distinguishable": bool(math.isfinite(error) and gap >= 2 * error)})
+                       "distinguishable": bool(math.isfinite(error) and gap > 2 * error)})
     return {"examples": len(batches), "baseline_loss": baseline, "single_layer": single, "greedy": greedy,
             "order": removed, "seconds": time.perf_counter() - start,
             "note": "Calibration split only; original pretrained model; ties broken toward the higher layer index.",
-            "noise_check": "gap = runner-up loss - chosen loss (token-weighted means); paired_standard_error = standard error "
-                           "of the per-example (mean answer-token loss) difference runner-up - chosen over the calibration "
-                           "examples; distinguishable = gap >= 2 standard errors. It does not change the selection."}
+            "noise_statistic": "per-example mean answer-token loss (unweighted across examples)",
+            "noise_check": "gap = mean over calibration examples of the per-example loss difference runner-up - chosen; "
+                           "paired_standard_error = its standard error (sample sd / sqrt(n)); distinguishable = gap > 2 "
+                           "standard errors (strict, so an exact tie is never distinguishable). loss and runner_up_loss "
+                           "are token-weighted means, as used for the selection, which this check does not change."}

@@ -179,11 +179,11 @@ def test_noise_check_fields_match_a_hand_computation():
                 per[layer] = layerdrop.calibration_loss(model, data, per_example=True)
         chosen, runner = step['removed_layer'], step['runner_up_layer']
         assert runner != chosen and per[runner][0] >= per[chosen][0]
-        assert step['gap'] == per[runner][0] - per[chosen][0] and step['runner_up_loss'] == per[runner][0]
+        assert step['runner_up_loss'] == per[runner][0]
         diffs = [a - b for a, b in zip(per[runner][1], per[chosen][1])]
         se = statistics.stdev(diffs) / math.sqrt(len(diffs))
-        assert step['paired_standard_error'] == pytest.approx(se)
-        assert step['distinguishable'] == (step['gap'] >= 2 * se)
+        assert step['gap'] == pytest.approx(sum(diffs) / len(diffs)) and step['paired_standard_error'] == pytest.approx(se)
+        assert step['distinguishable'] == (step['gap'] > 2 * se)
         removed.append(chosen)
     assert scan['order'] == removed and json.loads(json.dumps(scan)) == scan
 
@@ -219,3 +219,9 @@ def layer_run_shared(tmp_path, monkeypatch):
         campaign.fit(config, output, state, splits)
     assert calls == [2]  # one scan for all candidates, run to the deepest drop
     return json.loads((output / 'allocation.json').read_text())
+
+
+@pytest.mark.parametrize('name', ['original', 'unpruned-recovery'])
+def test_reserved_names(name):
+    with pytest.raises(ValueError, match='reserved|collide'):
+        campaign.validate_config(base_config(candidates=[{'id': name, 'drop': 2}]))

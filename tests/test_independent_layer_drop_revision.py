@@ -92,11 +92,12 @@ def test_noise_fields_match_recomputation_and_never_change_selection(seed, monke
         best, runner = rows[0], rows[1]
         assert entry['removed_layer'] == best[2] and entry['runner_up_layer'] == runner[2]
         assert entry['runner_up_loss'] == pytest.approx(runner[0], rel=1e-6)
-        assert entry['gap'] == pytest.approx(runner[0] - best[0], rel=1e-5, abs=1e-9)
         diffs = [a - b for a, b in zip(runner[3], best[3])]
+        # Revised rule: gap and SE share the per-example statistic; strict comparison (ties never distinguishable).
+        assert entry['gap'] == pytest.approx(sum(diffs) / len(diffs), rel=1e-5, abs=1e-9)
         se = statistics.stdev(diffs) / math.sqrt(len(diffs))
         assert entry['paired_standard_error'] == pytest.approx(se, rel=1e-5)
-        assert entry['distinguishable'] == (entry['gap'] >= 2 * entry['paired_standard_error'])
+        assert entry['distinguishable'] == (entry['gap'] > 2 * entry['paired_standard_error'])
         removed.append(best[2])
     # The noise check is purely descriptive: a scan without it (forcing NaN SE) selects the same order.
     monkeypatch.setattr(layerdrop, 'paired_standard_error', lambda a, b: math.nan)
@@ -113,9 +114,6 @@ def test_single_example_gives_null_se_and_round_trips():
     assert campaign._fingerprint(json.loads(json.dumps(record))) == campaign._fingerprint(record)
 
 
-@pytest.mark.xfail(strict=True, reason='BUG (low, descriptive field only): an exact tie between the chosen layer and the '
-                   'runner-up (gap 0, every per-example difference 0, so SE 0) is flagged distinguishable=True because '
-                   'the rule is gap >= 2*SE; a tie can never be distinguishable.')
 def test_exact_tie_is_not_distinguishable():
     model = tiny(layers=5, seed=4)
     for layer in range(5):
