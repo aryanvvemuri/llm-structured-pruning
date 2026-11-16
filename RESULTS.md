@@ -93,7 +93,7 @@ Caveats:
 
 These longer runs exposed growing MPS allocator caching: peak driver memory reached about 18 GB with a teacher on the 24 GB machine. Recovery now empties the MPS cache after every update and after each assessment, which brings the peak to 8.2 GB with bit-identical training losses.
 
-## Improvements 1 and 7: allocator and iterative pruning at 20% (rejected)
+## Improvements 1 and 7: allocator and iterative pruning at 20% (curve allocator accepted after a predeclared retest; iterative rejected)
 
 Both ran in one run, `runs/support-v2-allocator`: 5 seeds, the 2a recipe, 20% pruning. Numbers are token F1 on dev-holdout, paired by seed, and the test split remains sealed. An independent verifier recomputed all 21,000 per-example scores with 0 mismatches.
 
@@ -107,7 +107,7 @@ Both ran in one run, `runs/support-v2-allocator`: 5 seeds, the 2a recipe, 20% pr
 | Global-standardized, 20% (1b) | 395,286,400 (19.988%) | 53.40 (0.77) |
 | Iterative 10%→20% | 394,942,336 (20.057%) | 52.48 (0.31) |
 
-### Improvement 1: curve and global-standardized allocators, rejected (not established, suggestive)
+### Improvement 1: curve and global-standardized allocators, first run (not established, suggestive)
 
 The predeclared primary comparison is curve-20 minus uniform-20: **+1.29**. The bootstrap interval is [−0.23, +2.84] and the seed t interval is [+0.12, +2.46], so the decision is "not established". The per-seed differences were +0.39, +0.53, +1.98, +2.56 and +0.99. The gain is consistent across seeds but not shown across document families (families-only interval [+0.07, +2.50]); the minimum detectable effect is about 2.2 F1.
 
@@ -138,7 +138,44 @@ The sensitivity probes were dominated by noise: 33 of the 72 raw values were neg
 | Global-standardized | 1.8713 |
 | Legacy | 2.0481 |
 
-**Conclusion:** do not claim that the curve allocator beats uniform. The legacy per-layer allocator on `main` is the worst option at 20%, so **use uniform allocation**. Adding seeds to this run would be optional stopping. A legitimate retest is a fresh predeclared run, ideally with more development families. The code is on branch `experiment/1-allocator`.
+**First-run conclusion (superseded by the retest below):** the curve allocator's gain over uniform was not established. The legacy per-layer allocator on `main` was the worst option at 20%. Adding seeds to this run would have been optional stopping, so a fresh predeclared run was used instead. The global-standardized allocator showed no gain and was not retested or landed.
+
+### Improvement 1 retest: curve allocator, accepted (predeclared, 10 fresh seeds)
+
+The retest is predeclared in `plans/improvement-1-allocator-retest.md` (commit ec9e477) and configured in `configs/support-v2-allocator-retest.json`. Run `runs/support-v2-allocator-retest` trained `unpruned-recovery`, `uniform-20` and `curve-20` with the same recipe on ten fresh recovery seeds, 20261119–20261128. The decision uses those ten seeds only. Numbers are dev-holdout token F1, paired by seed, and the test split remains sealed.
+
+| Variant | Parameters | Mean F1 ± seed sd |
+| --- | ---: | ---: |
+| Recovery only | 494,032,768 | 54.61 ± 0.72 |
+| Uniform 20% | 394,942,336 | 53.76 ± 0.55 |
+| Curve allocator, 20% | 395,286,400 | 55.09 ± 0.92 |
+
+| Comparison | Difference | Bootstrap 95% | Seed t 95% | Decision |
+| --- | ---: | --- | --- | --- |
+| Curve − uniform (predeclared primary) | **+1.33** | [+0.14, +2.58] | [+0.64, +2.02] | **confident: accepted** |
+| Curve − recovery only | +0.48 | | | not established |
+| Uniform − recovery only | −0.85 | | | not established |
+
+**Verification.** An independent verifier recomputed all 27,000 per-example rows with 0 mismatches. It found the primary difference to be +1.33, with bootstrap [+0.12, +2.54] and paired t [+0.64, +2.02]: confident under every bootstrap seed and interval method it tried.
+
+**The acceptance is marginal.**
+- The bootstrap lower bound is about +0.12.
+- Leaving out seed 20261121 or seed 20261125 makes the result "not established", with bootstrap lower bounds of −0.08 and −0.02. The t interval stays above zero in every leave-one-out case.
+
+**What was replicated.** Only the recovery-seed variation. The retest used the same dev set and document families as the first run, and the same fixed curve masks. The gain is therefore shown for this dev distribution and at 20% pruning only.
+
+**Pooled, descriptive only (15 seeds):** +1.32, bootstrap [+0.17, +2.46], t [+0.81, +1.83]. The first run (+1.29) and the retest (+1.33) agree.
+
+**Size.** `curve-20` has 344,064 more parameters than `uniform-20`, 0.09% more.
+
+**Interruptions.** The run was interrupted and resumed twice, and the verifier found both sound:
+- The paused seed, 20261126, ran straight through.
+- In the relaunched seed, 20261127, the unfinished candidate was retrained from scratch and reproduced its earlier logged history exactly.
+- The predeclaration commit, ec9e477, preceded the first retest output by 45 minutes.
+
+**Checkpoint selection does not favour `curve-20`.** The selection subset happens to flatter `uniform-20`, and all decisions use holdout.
+
+**Recommendation.** At 20% removal, use `allocation: {"methods": ["legacy", "curve"]}` and the `curve-20` candidate. Uniform remains the code default, and it is the right choice when a stock-loadable uniform shape matters: curve exports have per-layer widths and need the project loader. The curve allocator was tested only at 20% on this dataset. Its masks are fixed, and only recovery seeds varied. The global-standardized allocator was not landed; it remains on branch `experiment/1-allocator`.
 
 ### Improvement 7: iterative pruning, rejected (no benefit)
 

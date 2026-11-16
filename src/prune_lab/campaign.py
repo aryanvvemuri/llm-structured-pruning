@@ -112,8 +112,12 @@ def validate_config(config):
         reference = config.get("selection_reference", "original")
         if reference != "original" and reference not in chosen:
             raise ValueError(f"train_candidates must include the selection reference {reference}")
-    if not candidate_specs(config):  # Also validates names and train_candidates.
+    if not candidate_specs(config):  # Also validates allocation options, names and train_candidates.
         raise ValueError("No candidates to train")
+    if config.get("allocation") is not None and allocation_options(config)["curve_sensitivity_examples"] is not None:
+        calibration = (config.get("counts") or {}).get("calibration")
+        if isinstance(calibration, int) and allocation_options(config)["curve_sensitivity_examples"] > calibration:
+            raise ValueError("curve_sensitivity_examples exceeds counts.calibration")
 
 
 def selection_dev_subset(dev, count, seed):
@@ -289,6 +293,39 @@ def preflight(config, output, splits):
         _release()
 
 
+ALLOCATION_METHODS = {"legacy": "per-layer", "curve": "curve"}
+ALLOCATION_KEYS = {"method", "methods", "curve_sensitivity_examples", "probe_fractions", "min_keep_ratio"}
+
+
+def allocation_options(config):
+    """Opt-in improvement-1 allocators; None (absent) keeps the legacy allocator only."""
+    from .allocation import CURVE_FRACTIONS, NEW_MIN_KEEP_RATIO
+    options = config.get("allocation")
+    if options is None:
+        return None
+    if not isinstance(options, dict) or set(options) - ALLOCATION_KEYS or ("method" in options) == ("methods" in options):
+        raise ValueError(f"allocation must be an object with exactly one of method/methods and keys from {sorted(ALLOCATION_KEYS)}")
+    methods = options["methods"] if "methods" in options else [options["method"]]
+    if (not isinstance(methods, list) or not methods or len(set(map(str, methods))) != len(methods)
+            or any(m not in ALLOCATION_METHODS for m in methods)):
+        raise ValueError(f"allocation methods must be distinct values from {sorted(ALLOCATION_METHODS)}")
+    examples = options.get("curve_sensitivity_examples")
+    if examples is not None and (isinstance(examples, bool) or not isinstance(examples, int) or examples < 1):
+        raise ValueError("curve_sensitivity_examples must be a positive integer or null (all calibration examples)")
+    fractions = options.get("probe_fractions", list(CURVE_FRACTIONS))
+    if (not isinstance(fractions, list) or not fractions
+            or any(isinstance(f, bool) or not isinstance(f, (int, float)) or not 0 < f < 1 for f in fractions)
+            or fractions != sorted(set(fractions))):
+        raise ValueError("probe_fractions must be strictly increasing values in (0, 1)")
+    keep = options.get("min_keep_ratio", NEW_MIN_KEEP_RATIO)
+    if isinstance(keep, bool) or not isinstance(keep, (int, float)) or not math.isfinite(keep) or not 0 < keep <= 1:
+        raise ValueError("allocation min_keep_ratio must be in (0, 1]")
+    if "curve" in methods and 1 - keep > fractions[-1] + 1e-12:
+        raise ValueError("The curve allocator's removal cap exceeds the largest probed fraction")
+    return {"methods": methods, "curve_sensitivity_examples": examples, "probe_fractions": fractions,
+            "min_keep_ratio": keep}
+
+
 def _percent(target):
     return f"{round(100 * target):d}"
 
@@ -296,8 +333,16 @@ def _percent(target):
 def candidate_specs(config):
     """Per-layer candidates per target plus controls; ``uniform_per_target`` adds ``uniform-<pct>``
     for every target and ``train_candidates`` restricts which candidates are allocated and trained."""
-    result = [{"id": f"per-layer-{i:02d}", "target": target, "uniform": False, "control": False}
-              for i, target in enumerate(config["targets"], 1)]
+    options = allocation_options(config)
+    methods = options["methods"] if options else ["legacy"]
+    result = []
+    if "legacy" in methods:
+        result += [{"id": f"per-layer-{i:02d}", "target": target, "uniform": False, "control": False}
+                   for i, target in enumerate(config["targets"], 1)]
+    for method in methods:
+        if method != "legacy":
+            result += [{"id": f"{ALLOCATION_METHODS[method]}-{_percent(target)}", "target": target, "uniform": False,
+                        "control": False, "method": method} for target in config["targets"]]
     if config["include_controls"]:
         result += [{"id": "unpruned-recovery", "target": 0.0, "uniform": False, "control": True},
                    {"id": "uniform-10", "target": 0.10, "uniform": True, "control": True,
@@ -366,6 +411,7 @@ def select_tiers(baseline, candidates, tolerances=None, retention_targets=None):
 
 def fit(config, output, state, splits):
     from .allocation import allocate_neurons, measure_sensitivity
+    from . import allocation as allocators
     from .artifacts import save_checkpoint
     from .modeling import count_parameters, mlp_layers
     from .pruning import compact_model
@@ -389,17 +435,41 @@ def fit(config, output, state, splits):
             scores = score_neurons(model, calibration, "taylor")
             sensitivity = measure_sensitivity(model, calibration[:config["sensitivity_examples"]],
                                               probe_fraction=config["probe_fraction"], scores=scores)
+            options = allocation_options(config)
+            specs = candidate_specs(config)
+            extra = {}
+            if any(spec.get("method") == "curve" for spec in specs):
+                curve_start = time.perf_counter()
+                count = options["curve_sensitivity_examples"] or len(calibration)
+                probes = allocators.measure_sensitivity_curves(model, calibration[:count], scores, options["probe_fractions"])
+                extra["curve_probes"] = {"examples": len(calibration[:count]), "fractions": options["probe_fractions"],
+                                         "baseline_loss": probes["baseline"], "raw": probes["raw"],
+                                         "curves": {i: allocators.process_curve(v) for i, v in probes["raw"].items()},
+                                         "seconds": time.perf_counter() - curve_start}
             allocations = []
-            for spec in candidate_specs(config):
+            for spec in specs:
                 if spec["target"] == 0:
                     keep = {i: list(range(m.down_proj.in_features)) for i, m in enumerate(mlp_layers(model))}
+                elif spec.get("method") == "curve":
+                    keep = allocators.allocate_curve(model, scores, extra["curve_probes"]["raw"], spec["target"],
+                                                     config["group_size"], options["min_keep_ratio"], options["probe_fractions"])
                 else:
                     keep = allocate_neurons(model, scores, sensitivity, spec["target"],
                                             config["group_size"], config["min_keep_ratio"], spec["uniform"])
                 allocations.append(dict(spec, keep_indices=keep))
+            if options is not None:
+                extra["allocation_options"] = options
+                # Per-neuron Taylor scores, so every mask can be recomputed from the record alone.
+                extra["taylor_scores"] = {i: scores[i].detach().cpu().tolist() for i in sorted(scores)}
+                extra["removal_fractions"] = {a["id"]: allocators.removal_fractions(scores, a["keep_indices"]) for a in allocations}
+                # Calibration loss right after pruning (masked, before any recovery), per candidate.
+                extra["calibration_loss_after_pruning"] = {
+                    a["id"]: allocators.masked_calibration_loss(model, calibration, {int(k): v for k, v in a["keep_indices"].items()})
+                    for a in allocations}
             write_json(output / "baseline.json", baseline)
             write_json(output / "allocation.json", {"candidates": allocations, "sensitivity": sensitivity,
-                       "elapsed_seconds": time.perf_counter() - start, "baseline_sha256": _fingerprint(baseline)})
+                       "elapsed_seconds": time.perf_counter() - start, "baseline_sha256": _fingerprint(baseline),
+                       **extra})
         finally:
             del model, tokenizer
             _release()

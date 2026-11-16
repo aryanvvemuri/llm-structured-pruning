@@ -33,7 +33,13 @@ The campaign also trains an unpruned control and a uniform 10% pruning control w
 
 Two opt-in campaign options control which candidates exist: `uniform_per_target: true` adds a uniform control `uniform-<pct>` for every target (besides `uniform-10`), and `train_candidates: [...]` restricts allocation and training to the listed names (it must include the selection reference). Without them the candidate list is unchanged.
 
-**Allocation advice (5 seeds, 20% pruning, dev-holdout):** use uniform allocation. The legacy per-layer allocator was the worst option, 0.51 F1 below uniform and 2.11 below recovery only (confident). Two candidate replacements did not establish a gain over uniform: a curve-based allocator (+1.29, consistent across seeds but not across document families) and a FLAP-style global-standardized one (+0.11). Iterative 10%→20% pruning was 0.81 below one-shot uniform. Both are rejected; see RESULTS.md and branches `experiment/1-allocator` and `experiment/7-iterative`.
+**Allocation advice (20% pruning, dev-holdout):** use the curve allocator, `allocation: {"methods": ["legacy", "curve"]}` with the `curve-<pct>` candidate. In a predeclared retest on 10 fresh seeds it beat uniform pruning by +1.33 F1 (bootstrap [+0.14, +2.58], t [+0.64, +2.02]; confident but marginal). The first 5-seed run agreed with +1.29. Uniform stays the default and is the choice when a stock-loadable uniform shape matters. The curve allocator was tested only at 20% on this dataset, with fixed masks and only recovery seeds varying. The legacy per-layer allocator is the worst option at 20%. The FLAP-style global-standardized allocator showed no gain and is not on `main`, and iterative pruning was rejected. See RESULTS.md and the `curve` options below.
+
+The curve allocator (`allocation.method`/`methods`, opt-in) works as follows:
+- **Probes:** each layer is probed at 10, 25 and 50% removal on all calibration examples.
+- **Curves:** negative increases are clamped to 0, then the running maximum is taken.
+- **Removal:** 64-neuron groups are removed greedily by the smallest marginal loss increase per parameter, with ties broken toward the least-pruned layer and at most 50% removed per layer.
+- **Record:** `allocation.json` holds the probes, curves, Taylor scores, removal fractions and calibration loss after pruning.
 
 ### Select by retained baseline quality
 
