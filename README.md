@@ -1,8 +1,56 @@
-# Local Qwen neuron pruning lab
+# LLM structured pruning lab
 
-This project tests structured MLP pruning on numeric arithmetic and document-grounded customer-support replies. It supports uniform pruning, different widths per layer, and short LoRA recovery training. It uses Qwen2.5-0.5B-Instruct in float32, with one loaded model at a time, for a Mac with 24 GB unified memory. The full campaign explicitly requires MPS; CPU is available when explicitly selected.
+Experiments in making a small language model smaller and faster without losing quality. The model is Qwen2.5-0.5B-Instruct, the task is document-grounded customer-support replies (Doc2Dial), and everything runs locally on an Apple Silicon Mac.
 
-See [RESULTS.md](RESULTS.md) for validation: **222 current software tests**, verified checkpoint exports, and completed M5 Pro experiments. On 300 held-out Doc2Dial support replies, recovered full Qwen scores **53.72 token F1**, per-layer 10% pruning **52.47**, uniform 10% **51.94**, and per-layer 20% **46.19**. These are word-overlap scores, not customer-support accuracy. No pruned candidate qualified for the zero-drop development tier, and per-layer allocation has not established an advantage over uniform pruning. Earlier arithmetic results and their data-overlap limitations remain in the report.
+The project prunes whole MLP neurons using Taylor importance, physically removes them, and recovers quality with a short rank-8 LoRA pass. On top of that baseline it tests eight proposed improvements, each judged by one predeclared comparison over several training seeds. Ideas that pass are on `main`; ideas that fail are kept on `experiment/*` branches with the reason recorded.
+
+## Results at a glance
+
+Scores are token F1 on a 450-example development holdout. Token F1 is a word-overlap score, **not** customer-support accuracy. The final test split has not been opened for any of these results.
+
+| Model | Parameters | Token F1 | Notes |
+| --- | ---: | ---: | --- |
+| Original Qwen2.5-0.5B, no training | 494.0M | 22.05 | |
+| Unpruned + recovery | 494.0M | 54.89 | the quality reference |
+| Uniform 10% pruning | 444.5M | 54.32 | −0.57, not distinguishable from unpruned |
+| Uniform 20% pruning | 394.9M | 53.29 | −1.60, not distinguishable from unpruned |
+| Curve-allocated 20% pruning | 395.3M | 55.09 | +1.33 over uniform 20% on 10 fresh seeds |
+| Unpruned, 8-bit (MLX) | 525 MB | 54.91 | half the size, no quality loss |
+| Unpruned, 4-bit (MLX) | 278 MB | 50.52 | costs 4.3–4.6 F1 |
+
+Rows come from separate multi-seed runs (5 seeds unless noted), so compare them through the paired differences in [RESULTS.md](RESULTS.md), not by subtracting table entries.
+
+**Speed.** Uniform 20% pruning generates about 6–7% faster than the unpruned model in batched PyTorch float16 on an Apple GPU, and about 12–17% faster under MLX. Timings were taken on one Mac; a data-center GPU with a serving stack was not tested.
+
+## What worked and what didn't
+
+| # | Idea | Outcome | Where |
+| --- | --- | --- | --- |
+| 1 | Allocate pruning per layer from measured loss curves | **Accepted.** +1.33 F1 over uniform at 20%, confident but marginal | `main` |
+| 2a | Longer recovery schedule with warmup and cosine decay | **Accepted.** +7.26 F1 and much lower seed variance | `main` |
+| 2b, 2c | Distillation from the full model; LoRA on attention | Rejected: no measurable gain | [`experiment/2-distill-attn`](../../tree/experiment/2-distill-attn) |
+| 3 | Larger dataset and multi-seed statistics | **Accepted.** The measurement basis for everything else | `main` |
+| 4 | 8-bit and 4-bit quantization (MLX) | **Accepted.** 8-bit is free; 4-bit is not | `main` |
+| 5 | Prune the larger Qwen2.5-1.5B down instead | No gain: it starts no better than the 0.5B on this task | `main` (code and write-up) |
+| 6 | Trim the vocabulary to tokens seen in training | Rejected: costs 1.57 F1 | [`experiment/6-vocabulary`](../../tree/experiment/6-vocabulary) |
+| 7 | Prune iteratively in several rounds | Rejected: no gain over one-shot pruning | [`experiment/7-iterative`](../../tree/experiment/7-iterative) |
+| 8 | Drop whole transformer layers | Opt-in. About 3% faster batched at equal size and quality; dropping 7 layers is 14% faster but costs 3 F1 | `main` |
+
+**Practical advice from these results**
+
+- For the smallest model at no quality cost, quantize to 8-bit first. It beats 20% pruning on both size and quality.
+- For 20% fewer parameters, use the curve allocator. Use uniform pruning when the export must load with stock Hugging Face classes.
+- Pruning and 8-bit quantization stack: uniform 20% at 8-bit is 420 MB at 53.30 F1.
+- Layer dropping and pruning the 1.5B model are not worth it here.
+
+## How results are judged
+
+- Each improvement names **one comparison in advance**. It passes only if two intervals both exclude zero with the same sign: a hierarchical bootstrap over seeds and document families, and a seed-level t interval.
+- Training is repeated over 5 or 10 seeds. Splits keep whole document families together, and the test split stays sealed.
+- An independent verifier recomputes every reported score from raw predictions before a result is accepted.
+- "Not established" means the experiment could not detect a difference, not that none exists. With 5 seeds the smallest reliably detectable difference is about 2 F1.
+
+[RESULTS.md](RESULTS.md) has the full numbers, intervals and caveats for every experiment. The rest of this README is reference documentation for running the code. The software has about 500 tests (`pytest -q`).
 
 ## Setup
 
