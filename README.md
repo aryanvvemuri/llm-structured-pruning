@@ -202,6 +202,25 @@ Exact sizes: original 1,543,714,304 parameters, `uniform-25` 1,155,610,112 (25.1
 
 `multi-seed compare` refuses runs of different base models unless `--allow-different-models` is given; seeds are then unpaired by default. `scripts/preflight_model.py` measures seconds per update and per reply, and peak MPS driver memory, on recovery data only. It also applies the plan's seed-count rule.
 
+### Improvement 8: layer dropping (opt-in, under evaluation)
+
+See `plans/improvement-8-layer-drop.md`. Configure it with a `layer_drop` block, for example `{"examples": 150, "candidates": [{"id": "layers-7", "drop": 7}, {"id": "layers-3-uniform-20", "drop": 3, "total_target": 0.2}]}`.
+
+- **Scan and selection:** the allocation stage scans single-layer removals on the original model, measuring calibration loss only. It then greedily removes, k times, the layer whose removal gives the lowest loss in the already-reduced network, breaking ties toward the higher index. The scan and order go into `allocation.json` and `layer-scan.json`.
+- **Physical removal:** dropped layers are removed from the model, and `num_hidden_layers`, `layer_types` and `layer_idx` are renumbered. A `layers-N` export loads with the stock Hugging Face class.
+- **Combined candidates:** `total_target` re-scores Taylor importance on the reduced network, then prunes MLPs uniformly so the *total* reduction against the original model reaches the target, using the uniform candidates' nearest-step rounding. Recovery is one pass on the final shape.
+
+Each greedy step also records the runner-up, both losses, the paired standard error of their per-example loss difference and `distinguishable` (gap ≥ 2 standard errors). This noise check does not change the selection.
+
+On Qwen2.5-0.5B the candidates have these sizes:
+- `layers-3`: 449,295,616 parameters (9.05% removed).
+- `layers-3-uniform-20`: 395,105,536 (20.02%; MLP width 3904 in 21 layers). It drops the same three layers as `layers-3`, the first three greedy steps.
+- `layers-7`: 389,646,080 (21.13%).
+
+`configs/support-v2-layer-drop.json` trains `unpruned-recovery`, `layers-3`, `layers-3-uniform-20` and `layers-7` with the 2a recipe.
+
+`scripts/speed_benchmark.py name=export_dir ... --reference <name> --dev <dev.jsonl> --output <json>` times prompt reading, batch-one ms per token and batch-16 tokens/s with forced 64-token greedy decoding. It keeps all models loaded, visits them in rotated order within each of `--repeats` (20) repeats after one warm-up each, and reports medians and model/reference ratios with 95% bootstrap intervals over repeats. `--mlx-8bit` also times 8-bit MLX conversions. Reduced-depth exports convert with the existing quantization code unchanged.
+
 ## Original uniform pruning experiment
 
 ```sh

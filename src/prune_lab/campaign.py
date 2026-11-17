@@ -118,6 +118,11 @@ def validate_config(config):
         calibration = (config.get("counts") or {}).get("calibration")
         if isinstance(calibration, int) and allocation_options(config)["curve_sensitivity_examples"] > calibration:
             raise ValueError("curve_sensitivity_examples exceeds counts.calibration")
+    from .layerdrop import check_shape_from_config
+    check_shape_from_config(config)  # Layer counts and total_target, from the model shape only.
+    if config.get("layer_drop") is not None and config.get("allocation") is not None:
+        raise ValueError("layer_drop cannot be combined with allocation methods (curve) yet: layer-drop candidates "
+                         "use uniform MLP pruning on the reduced network; run them in a separate config")
 
 
 def selection_dev_subset(dev, count, seed):
@@ -326,6 +331,9 @@ def allocation_options(config):
             "min_keep_ratio": keep}
 
 
+RESERVED_NAMES = ("original", "unpruned-recovery")
+
+
 def _percent(target):
     return f"{round(100 * target):d}"
 
@@ -351,7 +359,18 @@ def candidate_specs(config):
             result += [{"id": f"uniform-{_percent(target)}", "target": target, "uniform": True, "control": True,
                         "selection_eligible": config.get("select_uniform", False)}
                        for target in config["targets"] if f"uniform-{_percent(target)}" != "uniform-10"]
+    from .layerdrop import layer_drop_options
+    for item in (layer_drop_options(config) or {}).get("candidates", []):
+        total = item.get("total_target")
+        result.append({"id": item["id"], "target": total if total is not None else 0.0, "uniform": total is not None,
+                       "control": False, "kind": "layer-drop", "drop": item["drop"],
+                       **({"total_target": total} if total is not None else {})})
     ids = [spec["id"] for spec in result]
+    # Names the aggregation uses for the original-model baseline and the unpruned control.
+    for spec in result:
+        if spec["id"] in RESERVED_NAMES and not (spec["id"] == "unpruned-recovery" and spec.get("control")
+                                                 and spec["target"] == 0.0 and "kind" not in spec):
+            raise ValueError(f"Candidate name {spec['id']!r} is reserved")
     if len(set(ids)) != len(ids):
         raise ValueError(f"Candidate names collide: {ids}")
     chosen = config.get("train_candidates")
@@ -424,6 +443,8 @@ def fit(config, output, state, splits):
     if not (output / "allocation.json").exists():
         model, tokenizer = _load(config)
         try:
+            from . import layerdrop
+            layerdrop.check_shape(config, model)  # Before the baseline and Taylor scoring.
             print("Measuring baseline development score and calibration importance", flush=True)
             baseline = {"dev": _evaluate(model, tokenizer, splits["dev"], config),
                         "parameters": count_parameters(model), "source_identity": _source_identity(config, model),
@@ -446,8 +467,16 @@ def fit(config, output, state, splits):
                                          "baseline_loss": probes["baseline"], "raw": probes["raw"],
                                          "curves": {i: allocators.process_curve(v) for i, v in probes["raw"].items()},
                                          "seconds": time.perf_counter() - curve_start}
+            drops = [spec for spec in specs if spec.get("kind") == "layer-drop"]
+            if drops:
+                count = layerdrop.layer_drop_options(config)["examples"] or len(calibration)
+                print(f"Layer scan on {count} calibration examples", flush=True)
+                extra["layer_scan"] = layerdrop.scan_and_select(model, calibration[:count], max(s["drop"] for s in drops))
             allocations = []
             for spec in specs:
+                if spec.get("kind") == "layer-drop":
+                    allocations.append(_layer_drop_allocation(config, model, calibration, spec, extra["layer_scan"]))
+                    continue
                 if spec["target"] == 0:
                     keep = {i: list(range(m.down_proj.in_features)) for i, m in enumerate(mlp_layers(model))}
                 elif spec.get("method") == "curve":
@@ -477,6 +506,8 @@ def fit(config, output, state, splits):
     allocation = json.loads((output / "allocation.json").read_text())
     if allocation["baseline_sha256"] != _fingerprint(baseline):
         raise ValueError("Baseline changed after allocation")
+    if "layer_scan" in allocation and not (output / "layer-scan.json").exists():
+        write_json(output / "layer-scan.json", allocation["layer_scan"])  # Identical across seeds (shared allocation).
     selection_dev = _selection_dev(config, output, splits.get("dev"))
     skip_merged = config.get("skip_full_merged_dev", False)
     candidates = []
@@ -495,7 +526,12 @@ def fit(config, output, state, splits):
         try:
             model, tokenizer = _load(config)
             _verify_source(config, model, baseline)
-            if spec["target"]:
+            if spec.get("kind") == "layer-drop":
+                from .layerdrop import drop_layers
+                drop_layers(model, spec["dropped_layers"])
+                if spec.get("keep_indices"):
+                    compact_model(model, {int(k): v for k, v in spec["keep_indices"].items()})
+            elif spec["target"]:
                 compact_model(model, {int(k): v for k, v in spec["keep_indices"].items()})
             parameters = count_parameters(model)
             batches = make_batches(splits["recovery"], tokenizer, config["max_length"])
@@ -569,6 +605,50 @@ def fit(config, output, state, splits):
     write_json(output / "selection.json", selection)
     write_json(output / "selection-lock.json", {"sha256": _fingerprint(selection)})
     return selection
+
+
+def _layer_drop_allocation(config, model, calibration, spec, scan):
+    """Dropped layers from the greedy order; for a combined candidate, Taylor scores and a uniform MLP
+    mask computed on the reduced network (never the intact model's scores)."""
+    import copy
+    from .allocation import allocate_neurons
+    from .layerdrop import drop_layers
+    from .modeling import count_parameters, mlp_layers
+    from .scoring import score_neurons
+    original = count_parameters(model)
+    dropped = sorted(scan["order"][:spec["drop"]])
+    total_layers = len(model.model.layers)
+    kept = [i for i in range(total_layers) if i not in dropped]
+    result = dict(spec, dropped_layers=dropped, kept_layers=kept, keep_indices=None)
+    if spec.get("total_target") is None:
+        result["planned_parameters"] = original - sum(p.numel() for i in dropped for p in model.model.layers[i].parameters())
+        return result
+    reduced = copy.deepcopy(model)
+    try:
+        drop_layers(reduced, dropped)
+        remaining = count_parameters(reduced)
+        scores = score_neurons(reduced, calibration, "taylor")  # on the reduced network
+        # Uniform MLP pruning of the kept layers so the TOTAL reduction against the original model
+        # reaches total_target, with the uniform candidates' nearest-reachable-step rounding.
+        target = (spec["total_target"] * original - (original - remaining)) / remaining
+        keep = allocate_neurons(reduced, scores, {i: 1.0 for i in scores}, target, config["group_size"],
+                                config["min_keep_ratio"], True)
+        widths = [len(keep[i]) for i in sorted(keep)]
+        per_neuron = [m.gate_proj.in_features + m.up_proj.in_features + m.down_proj.out_features for m in mlp_layers(reduced)]
+        planned = remaining - sum((m.down_proj.in_features - w) * c for m, w, c in zip(mlp_layers(reduced), widths, per_neuron))
+        result.update(keep_indices=keep, reduced_mlp_target=target, scores_sha256=_scores_sha256(scores),
+                      planned_parameters=planned)
+    finally:
+        del reduced
+        _release()
+    return result
+
+
+def _scores_sha256(scores):
+    digest = hashlib.sha256()
+    for i in sorted(scores):
+        digest.update(scores[i].detach().cpu().float().contiguous().numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _selection(output):
