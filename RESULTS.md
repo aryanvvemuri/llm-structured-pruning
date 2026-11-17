@@ -316,6 +316,72 @@ On the secondary dev-full set, the primary difference is −2.03 and confident.
 
 **Cost.** The preflight measured 1.54 s per update and 11.2 GB peak MPS driver memory for the unpruned 1.5B. In the full run the peak was 12.1–13.2 GB for unpruned and uniform-25 and about 11 GB for uniform-50. The whole 5-seed run took about 7.5 hours on this Mac.
 
+## Improvement 8: layer dropping (passes on speed; `layers-3-uniform-20` accepted under rule (b))
+
+Run `runs/support-v2-layer-drop` (`configs/support-v2-layer-drop.json`) used the 2a recipe, 5 seeds (20261114–20261118), and checkpoints kept. Quality is token F1 on dev-holdout, paired by seed against `uniform-20` (53.29 ± 1.33) from `runs/support-v2-allocator`. The test split was not touched. An independent verifier recomputed every number below from raw data, and the re-trained `unpruned-recovery` reproduced the stored one exactly.
+
+The plan (`plans/improvement-8-layer-drop.md`) predeclared two comparisons against `uniform-20` and two pass rules:
+- **Rule (a):** a confident F1 gain, and not confidently slower.
+- **Rule (b):** confidently faster, with both F1 interval lower bounds above −2.0.
+
+| Candidate | Dropped layers | Parameters | F1 | Δ vs uniform-20 | Bootstrap 95% | Seed t 95% | Decision |
+| --- | --- | ---: | ---: | ---: | --- | --- | --- |
+| `layers-3-uniform-20` (primary) | 3, 18, 19, then MLP width 3904 in 21 layers | 395,105,536 (20.02%) | 53.92 ± 1.25 | +0.63 | [−1.08, +2.41] | [−1.04, +2.31] | not established; both lower bounds > −2.0 |
+| `layers-3` (second) | 3, 18, 19 | 449,295,616 (9.05%) | 54.98 ± 0.36 | +1.69 | [+0.05, +3.39] | [+0.43, +2.95] | formally confident; borderline |
+| `layers-7` (descriptive) | 3, 11, 12, 13, 18, 19, 22 | 389,646,080 (21.13%) | 50.25 ± 1.18 | −3.04 | | | confident worse |
+
+**Speed.** The predeclared primary speed metric is generation tokens/s at batch 16, PyTorch MPS float16, as a ratio to `uniform-20`. Each value is a median over 20 interleaved repeats, with a 95% bootstrap interval.
+
+| Candidate | Batch-16 tokens/s ratio | Verdict |
+| --- | --- | --- |
+| `layers-3-uniform-20` | 1.110 [1.019, 1.262] | confidently faster |
+| `layers-3` | 1.053 [0.901, 1.202] | not established |
+| `layers-7` | 1.149 [1.067, 1.315] | confidently faster |
+| `curve-20` | 1.000 [0.916, 1.148] | not established |
+
+`layers-3-uniform-20`'s speedup held under four alternative analyses (interval lower bounds 1.006–1.044), and it won 15 of the 20 repeats.
+
+**Decision**
+- **`layers-3-uniform-20` passes rule (b),** and this is the reason for landing. It is confidently faster at the same size, and its F1 difference is not established with both lower bounds above −2.0.
+- **`layers-3` is formally "confident" under rule (a), but borderline,** so it is not an established gain:
+  - the bootstrap lower bound is about 0 and changes sign with the bootstrap seed (the verifier's 20,000 resamples gave [−0.01, +3.44]);
+  - leaving out one seed keeps confidence in only 2 of the 5 cases;
+  - it is compared with a smaller model. Against size-matched `uniform-10` it is +0.66, and against `unpruned-recovery` (54.89) +0.09, both not established;
+  - it chose update 450 in all 5 seeds, so it may be under-trained.
+- **`layers-7` is rejected on quality:** −3.04 against `uniform-20` and −4.64 against `unpruned-recovery`, both confident, despite being the fastest.
+
+**Descriptive comparisons**
+- `layers-3-uniform-20` − `curve-20`: −0.66, not established.
+- `layers-3` − `curve-20`: +0.40, not established.
+- `layers-3-uniform-20` − `unpruned-recovery`: −0.96, not established.
+
+**Other speed views against `uniform-20`.** The gain is mostly a batched-throughput effect.
+
+| Candidate | Batch-one ms/token, PyTorch float16 | MLX 8-bit batch-one ms/token |
+| --- | --- | --- |
+| `layers-3-uniform-20` | 0.964 [0.939, 0.989], about 2% faster | 0.973 [0.965, 1.002], 1–2.4% faster; the tool interval touches 1 |
+| `layers-3` | 1.012, not established | 1.007, not established |
+| `layers-7` | 0.935 | 0.870–0.875, faster |
+| `curve-20` | | 1.022, not established (2–3% slower in the per-repeat analysis) |
+| `unpruned-recovery` | | 1.107 [1.091, 1.176], slower |
+
+At the MLX 8-bit deployment point, layer dropping buys little unless 7 layers go. The float32 block of that benchmark is **invalid**: all models were resident at once, the machine thrashed, and the reference drifted about 6×. Its numbers are not reported. Single timing measurements swung by ±15%.
+
+**[Placeholder — clean re-run pending: a float16-only re-run with 50 repeats, using `--max-loaded`, will replace or confirm the speed ratios above. No numbers from it are reported yet.]**
+
+**Layer scan** (calibration loss, original model)
+- **Critical layers:** layers 0 and 1 (+8.75 and +3.80).
+- **Layers that help when removed:** removing layer 3, 4, 8, 11 or 12 alone *lowers* the loss.
+- **Greedy order:** 3, 18, 19, 22, 13, 12, 11.
+- **Noise:** only steps 3 and 6 were distinguishable (gap > 2 standard errors). Two of the three layers dropped by both 3-layer candidates were therefore chosen without a clear margin: 3 against 8, and 18 against 19.
+
+**Caveats**
+- **Rule (b) admits a candidate up to 2 F1 worse.**
+- **No multiplicity correction:** two comparisons were declared, and none was applied.
+- **Answer loss is worse at equal F1:** `layers-3-uniform-20` 1.205 against `uniform-20` 1.135, and `layers-3` 1.141 against `unpruned-recovery` 1.031.
+- **The speed gain is platform-specific:** about 10% in PyTorch float16 at batch 16, about 2% at batch one, and about 1–2% in MLX 8-bit. It was measured on one Apple GPU only.
+- **One dev set.**
+
 ## Relative baseline-retention mode
 
 Added optional `retention_targets`, such as `[0.95]`, with `tiers_pp: null`. The harness selects the smallest tested candidate whose development score is at least the requested fraction of its chosen baseline. Final testing recomputes the floor from the baseline's test score, reports failures without reselection, and marks a zero test baseline as unassessable. For support this measures token-F1 retention, not accuracy. Candidate generation remains a bounded grid, rather than an adaptive search for maximum compression.

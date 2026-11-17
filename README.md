@@ -202,7 +202,9 @@ Exact sizes: original 1,543,714,304 parameters, `uniform-25` 1,155,610,112 (25.1
 
 `multi-seed compare` refuses runs of different base models unless `--allow-different-models` is given; seeds are then unpaired by default. `scripts/preflight_model.py` measures seconds per update and per reply, and peak MPS driver memory, on recovery data only. It also applies the plan's seed-count rule.
 
-### Improvement 8: layer dropping (opt-in, under evaluation)
+### Improvement 8: layer dropping (opt-in; `layers-3-uniform-20` accepted for batched throughput)
+
+**Advice.** `layer_drop` is opt-in. When batched throughput matters, drop 3 layers and prune MLPs uniformly to 20% in total (`layers-3-uniform-20`). It was about 11% faster than `uniform-20` at batch 16 (PyTorch MPS float16, 1.110 [1.019, 1.262]) with F1 not established either way (+0.63), but only about 2% faster at batch one and 1–2% in MLX 8-bit. Do not drop 7 layers: it is −3.04 F1 against `uniform-20`. `curve-20` remains the best-quality 20% option. `layer_drop` cannot be combined with `allocation` methods in one config. See RESULTS.md for the borderline `layers-3` result and the caveats.
 
 See `plans/improvement-8-layer-drop.md`. Configure it with a `layer_drop` block, for example `{"examples": 150, "candidates": [{"id": "layers-7", "drop": 7}, {"id": "layers-3-uniform-20", "drop": 3, "total_target": 0.2}]}`.
 
@@ -219,7 +221,7 @@ On Qwen2.5-0.5B the candidates have these sizes:
 
 `configs/support-v2-layer-drop.json` trains `unpruned-recovery`, `layers-3`, `layers-3-uniform-20` and `layers-7` with the 2a recipe.
 
-`scripts/speed_benchmark.py name=export_dir ... --reference <name> --dev <dev.jsonl> --output <json>` times prompt reading, batch-one ms per token and batch-16 tokens/s with forced 64-token greedy decoding. It keeps all models loaded, visits them in rotated order within each of `--repeats` (20) repeats after one warm-up each, and reports medians and model/reference ratios with 95% bootstrap intervals over repeats. `--mlx-8bit` also times 8-bit MLX conversions. Reduced-depth exports convert with the existing quantization code unchanged.
+`scripts/speed_benchmark.py name=export_dir ... --reference <name> --dev <dev.jsonl> --output <json>` times prompt reading, batch-one ms per token and batch-16 tokens/s with forced 64-token greedy decoding. It visits the models in rotated order within each of `--repeats` (20) repeats after one warm-up each. `--max-loaded N` keeps at most N models resident (use it for float32 on 24 GB); load and warm-up time are not measured. It reports medians and model/reference ratios with 95% bootstrap intervals over repeats, and records wall-clock timestamps per repeat. `--mlx-8bit` also times 8-bit MLX conversions. Reduced-depth exports convert with the existing quantization code unchanged.
 
 ## Original uniform pruning experiment
 
