@@ -1,10 +1,20 @@
 # LLM structured pruning lab
 
+[![tests](https://github.com/aryanvvemuri/llm-structured-pruning/actions/workflows/tests.yml/badge.svg)](https://github.com/aryanvvemuri/llm-structured-pruning/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Experiments in making a small language model smaller and faster without losing quality. The model is Qwen2.5-0.5B-Instruct, the task is document-grounded customer-support replies (Doc2Dial), and everything runs locally on an Apple Silicon Mac.
 
 The project prunes whole MLP neurons using Taylor importance, physically removes them, and recovers quality with a short rank-8 LoRA pass. On top of that baseline it tests eight proposed improvements, each judged by one predeclared comparison over several training seeds. Ideas that pass are on `main`; ideas that fail are kept on `experiment/*` branches with the reason recorded.
 
 ## Results at a glance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/f1-vs-size-dark.svg">
+  <img src="docs/figures/f1-vs-size-light.svg" alt="Token F1 against model size: 8-bit quantization keeps the unpruned score at half the size, 20% pruning costs about 1 F1, and 4-bit quantization or dropping 7 layers costs 3 to 6 F1." width="880">
+</picture>
+
+The chart uses the same 5 seeds for every point, so curve-allocated 20% pruning appears at 54.6; its 10-seed retest in the table below gave 55.09. Regenerate it with `python scripts/make_results_figure.py docs/figures`.
 
 Scores are token F1 on a 450-example development holdout. Token F1 is a word-overlap score, **not** customer-support accuracy. The final test split has not been opened for any of these results.
 
