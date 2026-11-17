@@ -295,3 +295,7 @@ For your own JSONL data set `dataset` to `jsonl` and `data_paths` to an object w
 For GSM8K install `.[gsm8k]` and set `dataset` to `gsm8k`. Calibration and development are disjoint shuffled subsets of official training data; test is a prefix of the official test partition. Increase `max_length` for worked solutions and `max_new_tokens` for reasoning. The offline synthetic source needs no dataset downloads. JSON configs merge top-level defaults; a supplied `search` object replaces the default search options (omitted search arguments use function defaults).
 
 This is a practical ablation workflow, not a custom LLM agent runtime. It does not claim that arithmetic generalizes to broader capabilities. Smoke sets contain only a few cases, so one answer changes accuracy dramatically; use larger development/test sets and report counts before drawing conclusions.
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE). The model weights and the dataset are not part of this repository and keep their own terms: Doc2Dial is CC-BY-3.0 according to its dataset card, and Qwen2.5-0.5B-Instruct is distributed by its authors under the license on its model card.
