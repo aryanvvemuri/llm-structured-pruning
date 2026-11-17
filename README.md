@@ -202,9 +202,9 @@ Exact sizes: original 1,543,714,304 parameters, `uniform-25` 1,155,610,112 (25.1
 
 `multi-seed compare` refuses runs of different base models unless `--allow-different-models` is given; seeds are then unpaired by default. `scripts/preflight_model.py` measures seconds per update and per reply, and peak MPS driver memory, on recovery data only. It also applies the plan's seed-count rule.
 
-### Improvement 8: layer dropping (opt-in; `layers-3-uniform-20` accepted for batched throughput)
+### Improvement 8: layer dropping (opt-in; small batched-throughput gain only)
 
-**Advice.** `layer_drop` is opt-in. When batched throughput matters, drop 3 layers and prune MLPs uniformly to 20% in total (`layers-3-uniform-20`). It was about 11% faster than `uniform-20` at batch 16 (PyTorch MPS float16, 1.110 [1.019, 1.262]) with F1 not established either way (+0.63), but only about 2% faster at batch one and 1–2% in MLX 8-bit. Do not drop 7 layers: it is −3.04 F1 against `uniform-20`. `curve-20` remains the best-quality 20% option. `layer_drop` cannot be combined with `allocation` methods in one config. See RESULTS.md for the borderline `layers-3` result and the caveats.
+**Advice.** Layer dropping stays available as an opt-in `layer_drop` block. On this hardware, dropping 3 layers plus uniform MLP pruning (`layers-3-uniform-20`) is at best a ~3% batched-throughput gain over `uniform-20` at equal size and quality. That is 1.026 [1.003, 1.037] tokens/s at batch 16 in PyTorch MPS float16, with batch one unchanged and F1 +0.63 (not established). It is not a reason to change the default: uniform or curve MLP pruning remain the recommended 20% options, with `curve-20` giving the best quality. Dropping 7 layers is the only clearly faster option (+14% batched), but it costs about 3 F1. Dropping only 3 layers without MLP pruning gives no speed benefit. `layer_drop` cannot be combined with `allocation` methods in one config. See RESULTS.md.
 
 See `plans/improvement-8-layer-drop.md`. Configure it with a `layer_drop` block, for example `{"examples": 150, "candidates": [{"id": "layers-7", "drop": 7}, {"id": "layers-3-uniform-20", "drop": 3, "total_target": 0.2}]}`.
 
