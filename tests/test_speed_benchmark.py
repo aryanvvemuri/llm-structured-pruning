@@ -149,3 +149,28 @@ def test_benchmark_script_mlx_8bit_mode(tmp_path, monkeypatch, mlx_cpu):
     block = json.loads(output.read_text())['results']['mlx-8bit']
     assert set(block['summary']['depth-pruned']['vs_reference']) == {'prefill_ms_per_prompt', 'decode_ms_per_token'}
     assert (tmp_path / 'mlx' / 'depth-pruned' / 'conversion.json').exists()
+
+
+def test_max_loaded_keeps_interleaving_and_records_timestamps(tmp_path, monkeypatch):
+    paths, dev = exports(tmp_path, monkeypatch)
+    from prune_lab import modeling
+    loads = []
+    real = modeling.load_model
+    monkeypatch.setattr(modeling, 'load_model', lambda path, **k: loads.append(Path(path).name) or real(path, **k))
+    output = tmp_path / 'bounded.json'
+    monkeypatch.setattr(sys, 'argv', ['speed_benchmark.py', '--reference', 'plain', '--dev', str(dev), '--output', str(output),
+                                      '--repeats', '3', '--prompts', '2', '--steps', '2', '--batch', '2', '--device', 'cpu',
+                                      '--dtypes', 'float32', '--bootstrap-samples', '20', '--max-loaded', '1',
+                                      *[f'{n}={p}' for n, p in paths.items()]])
+    runpy.run_path(str(SCRIPT), run_name='__main__')
+    report = json.loads(output.read_text())
+    block = report['results']['pytorch-float32']
+    assert report['max_loaded'] == 1 and all(len(block['runs'][n]) == 3 for n in paths)
+    # With one resident model every visit after the initial pass reloads (rotation changes the neighbour).
+    assert sum(block['models'][n]['loads'] for n in paths) == len(loads) > len(paths)
+    order = sorted((r['started_at'], n) for n in paths for r in block['runs'][n])
+    assert [n for _, n in order[:4]] == list(paths)  # repeat 0 visits models in order (interleaved, not grouped)
+    for n in paths:
+        rows = block['runs'][n]
+        assert [r['repeat'] for r in rows] == [0, 1, 2] and all(r['started_at'] <= r['finished_at'] for r in rows)
+    assert set(block['summary']['depth']['vs_reference']) == set(speed.METRICS)

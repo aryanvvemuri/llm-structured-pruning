@@ -6,6 +6,8 @@ Every model generates exactly --steps greedy tokens (no EOS stop) for the same -
 decode ms per token (batch one) and decode tokens/s at --batch (left-padded). All models stay
 loaded; each repeat visits them in rotated order after one warm-up pass per model. Output: per-model
 medians and, against --reference, ratios with 95% bootstrap intervals over repeats (JSON + markdown).
+--max-loaded N bounds resident models (least recently used is unloaded; load and warm-up are not timed);
+each repeat row records wall-clock started_at/finished_at.
 Plain, MLP-pruned and reduced-depth exports load through the project loader. --mlx-8bit also times
 batch-one generation of 8-bit MLX conversions made with the project's quantization code.
 
@@ -94,33 +96,57 @@ def rotated(names, repeat):
 
 
 def pytorch_runs(models, examples, args, dtype):
+    """Interleaved repeats. With --max-loaded N > 0 at most N models are resident: a model that is not
+    loaded is loaded (least recently used one unloaded first) and warmed up before it is timed, so
+    load and warm-up time are never measured. 0 keeps every model loaded (the original behaviour)."""
+    from collections import OrderedDict
     import torch
     from prune_lab.data import prompt_ids
     from prune_lab.modeling import count_parameters, load_model
-    loaded, info = {}, {}
-    for name, path in models.items():
-        model, tokenizer = load_model(path, device=args.device, dtype=dtype)
-        prompts = [list(prompt_ids(tokenizer, ex.prompt)) for ex in examples]
-        loaded[name] = (model, prompts, tokenizer.pad_token_id)
-        info[name] = {'export': path, 'parameters': count_parameters(model), 'layers': len(model.model.layers),
-                      'mlp_widths': sorted({layer.mlp.down_proj.in_features for layer in model.model.layers}),
-                      'prompt_tokens_mean': sum(map(len, prompts)) / len(prompts)}
+    loaded, info = OrderedDict(), {}
     timers = make_timers(torch, args.device)
+
+    def release():
+        import gc
+        gc.collect()
+        if args.device == 'mps':
+            torch.mps.empty_cache()
+
+    def get(name):
+        if name in loaded:
+            loaded.move_to_end(name)
+            return loaded[name]
+        if args.max_loaded and len(loaded) >= args.max_loaded:
+            loaded.popitem(last=False)
+            release()
+        model, tokenizer = load_model(models[name], device=args.device, dtype=dtype)
+        prompts = [list(prompt_ids(tokenizer, ex.prompt)) for ex in examples]
+        entry = (model, prompts, tokenizer.pad_token_id)
+        with torch.inference_mode():  # one warm-up pass per load
+            timers[0](model, prompts[0], args.steps)
+            timers[1](model, prompts[:args.batch], tokenizer.pad_token_id, args.steps)
+        if name not in info:
+            info[name] = {'export': models[name], 'parameters': count_parameters(model), 'layers': len(model.model.layers),
+                          'mlp_widths': sorted({layer.mlp.down_proj.in_features for layer in model.model.layers}),
+                          'prompt_tokens_mean': sum(map(len, prompts)) / len(prompts), 'loads': 0}
+        info[name]['loads'] += 1
+        loaded[name] = entry
+        return entry
+
     runs = {name: [] for name in models}
     names = list(models)
     with torch.inference_mode():
-        for name in names:  # one warm-up pass per model
-            model, prompts, pad = loaded[name]
-            timers[0](model, prompts[0], args.steps)
-            timers[1](model, prompts[:args.batch], pad, args.steps)
+        for name in names:  # initial load and warm-up (only the last --max-loaded stay resident)
+            get(name)
         for repeat in range(args.repeats):
             for name in rotated(names, repeat):
-                model, prompts, pad = loaded[name]
-                runs[name].append(measure_once(timers, model, prompts, pad, args.steps, args.batch))
+                model, prompts, pad = get(name)
+                started = time.time()
+                row = measure_once(timers, model, prompts, pad, args.steps, args.batch)
+                runs[name].append(dict(row, repeat=repeat, started_at=started, finished_at=time.time()))
             print(f'{dtype} repeat {repeat + 1}/{args.repeats}', flush=True)
-    del loaded
-    if args.device == 'mps':
-        torch.mps.empty_cache()
+    loaded.clear()
+    release()
     return runs, info
 
 
@@ -162,11 +188,13 @@ def mlx_runs(models, examples, args):
     for repeat in range(args.repeats):
         for name in rotated(names, repeat):
             model, prompts = loaded[name]
+            started = time.time()
             pre = dec = 0.0
             for ids in prompts:
                 a, b = timed(model, ids); pre += a; dec += b
             runs[name].append({'prefill_ms_per_prompt': 1000 * pre / len(prompts),
-                               'decode_ms_per_token': 1000 * dec / (len(prompts) * args.steps)})
+                               'decode_ms_per_token': 1000 * dec / (len(prompts) * args.steps),
+                               'repeat': repeat, 'started_at': started, 'finished_at': time.time()})
         print(f'mlx-8bit repeat {repeat + 1}/{args.repeats}', flush=True)
     return runs, info
 
@@ -210,11 +238,13 @@ def main(argv=None):
     parser.add_argument('--mlx-8bit', action='store_true')
     parser.add_argument('--mlx-dir', help='Where 8-bit MLX conversions are written (required with --mlx-8bit)')
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
+    parser.add_argument('--max-loaded', type=int, default=0,
+                        help='Keep at most N PyTorch models loaded (0 = all; e.g. 1-2 for float32 on 24 GB). Interleaving is kept.')
     args = parser.parse_args(argv)
     models = parse_models(args.models)
     if args.reference not in models:
         parser.error('--reference must be one of the model names')
-    if args.repeats < 2 or args.prompts < 1 or args.steps < 1 or args.batch < 1:
+    if args.repeats < 2 or args.prompts < 1 or args.steps < 1 or args.batch < 1 or args.max_loaded < 0:
         parser.error('--repeats >= 2 and positive --prompts/--steps/--batch required')
     if args.mlx_8bit and not args.mlx_dir:
         parser.error('--mlx-8bit needs --mlx-dir')
@@ -224,6 +254,7 @@ def main(argv=None):
     from prune_lab.support_data import read_support_jsonl
     examples = sorted(read_support_jsonl(args.dev), key=lambda ex: ex.key)[:args.prompts]
     report = {'reference': args.reference, 'prompts': len(examples), 'steps': args.steps, 'batch': args.batch,
+              'max_loaded': args.max_loaded,
               'repeats': args.repeats, 'device': args.device, 'prompt_keys': [ex.key for ex in examples], 'results': {}}
     for dtype in [d for d in args.dtypes.split(',') if d]:
         runs, info = pytorch_runs(models, examples, args, dtype)
