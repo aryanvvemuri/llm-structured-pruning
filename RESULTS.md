@@ -283,6 +283,8 @@ What would actually work is keeping every token of the deployment's document col
 
 The code is on branch `experiment/6-vocabulary`.
 
+**Speed (unaudited side measurement).** A scratch benchmark timed the trimmed exports on one Apple GPU (PyTorch float16, batch 16, 64 forced tokens, 32 prompts, 5 seeds × 3 repeats; output in the untracked `runs/support-v2-speed/speed.json`). Against the unpruned model, batched tokens/s rose by 5.7% [3.8, 7.6] for `uniform-20`, 8.1% [5.8, 10.6] for `vocab-unpruned` and 15.7% [11.5, 21.2] for `vocab-uniform-20` (265,764,224 parameters). This run used its own script, not `scripts/speed_benchmark.py`, and was not checked by the verifier, so it is not comparable repeat-for-repeat with the 50-repeat timings under Improvement 8. It does not change the decision: the speed comes with a confident F1 loss.
+
 ## Improvement 5: pruned Qwen2.5-1.5B against native 0.5B (no gain; 0.5B recommended)
 
 Run `runs/support-v2-1p5b` (`configs/support-v2-1p5b.json`) used the 2a recipe and v2 data with `Qwen/Qwen2.5-1.5B-Instruct`, 5 seeds. Numbers are token F1 on dev-holdout (450 examples), and the test split remains sealed. The reference is recovered unpruned 0.5B from `runs/support-v2-longer`. The two runs use different base models, so cross-model comparisons resample seeds independently and use Welch t (`--allow-different-models --unpaired-seeds`).
@@ -390,6 +392,8 @@ How robust each verdict is:
 - **Answer loss is worse at equal F1:** `layers-3-uniform-20` 1.205 against `uniform-20` 1.135, and `layers-3` 1.141 against `unpruned-recovery` 1.031.
 - **The speed results are platform-specific:** one Apple GPU only. The batched gain is about 3% (PyTorch float16), the batch-one change is about 0, and MLX 8-bit is about 1–2%.
 - **One dev set.**
+
+**Second clean timing run, with `curve-20` (November 17, 2026).** A further 50-repeat PyTorch float16 run used `unpruned-recovery` as the reference (`work/speed-readme.json`, untracked). Batched tokens/s against unpruned: `uniform-20` 1.060 [1.044, 1.069], `curve-20` 1.067 [1.054, 1.076], `layers-3-uniform-20` 1.104 [1.086, 1.114], `layers-7` 1.221 [1.208, 1.237]. Batch-one time per token: 0.923, 0.926, 0.916 and 0.875. These agree with the first clean run to within about one point, and show the curve allocator costs no speed against uniform pruning. The README speed table and figure use this run.
 
 ## Relative baseline-retention mode
 

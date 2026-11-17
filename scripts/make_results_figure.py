@@ -6,7 +6,8 @@ Two figures:
 
 * ``speed-vs-quality``: token F1 against batched generation speed relative to
   the unpruned model (PyTorch on an Apple GPU, float16, batch 16, 50 repeats;
-  ``scripts/speed_benchmark.py``). Horizontal bars are 95% intervals.
+  ``scripts/speed_benchmark.py``). Horizontal bars are 95% intervals. All points
+  come from one run that timed the five models in turn.
 * ``f1-vs-size``: token F1 against megabytes of weights (2 bytes per parameter
   for 16-bit models, measured MLX weight files for 8-bit and 4-bit).
 
@@ -36,13 +37,13 @@ UNPRUNED_F1 = 54.89
 # Speed figure. (label, group, % faster than unpruned, interval low, high, F1, dx, dy, anchor)
 SPEED = {
     "name": "speed-vs-quality",
-    "title": "Pruning 20% of the model makes it 7–10% faster with no detectable quality loss",
+    "title": "Pruning 20% of the model makes it 6–10% faster with no detectable quality loss",
     "subtitle": ["Token F1 (development holdout, mean of 5 seeds) against batched generation speed. "
                  "Bars are 95% intervals on speed.",
                  "Seed-to-seed sd is 0.4–1.3 F1, so points closer than about 1.5 F1 are not reliably different."],
-    "desc": "Uniform 20 percent pruning is about 7 percent faster than the unpruned model and dropping three "
-            "layers as well is about 10 percent faster, both within noise of the unpruned score. Dropping seven "
-            "layers is about 23 percent faster but loses 4.6 F1.",
+    "desc": "Uniform and curve-allocated 20 percent pruning are about 6 to 7 percent faster than the unpruned model "
+            "and dropping three layers as well is about 10 percent faster, all within noise of the unpruned score. "
+            "Dropping seven layers is about 22 percent faster but loses 4.6 F1.",
     "xlabel": "Generation speed against the unpruned model (batch 16) — further right is faster",
     "footer": "Qwen2.5-0.5B-Instruct on Doc2Dial replies. PyTorch, float16, one Apple GPU, 64 forced tokens, "
               "50 repeats. Token F1 is word overlap, not accuracy.",
@@ -51,10 +52,10 @@ SPEED = {
     "legend": ["ref", "prune", "layer"],
     "points": [
         ("Unpruned", "ref", 0.0, None, None, 54.89, 0, 22, "middle"),
-        ("Uniform 20%", "prune", 7.2, 6.3, 8.8, 53.29, 0, 22, "middle"),
-        ("Drop 3 layers", "layer", 5.9, 4.6, 7.5, 54.98, 0, -14, "middle"),
-        ("Drop 3 layers + uniform 20%", "layer", 10.0, 7.6, 11.8, 53.92, 56, 4, "start"),
-        ("Drop 7 layers", "layer", 22.6, 21.2, 24.4, 50.25, 0, -14, "middle"),
+        ("Uniform 20%", "prune", 6.0, 4.4, 6.9, 53.29, 0, 22, "middle"),
+        ("Curve 20%", "prune", 6.7, 5.4, 7.6, 54.58, -22, 22, "middle"),
+        ("Drop 3 layers + uniform 20%", "layer", 10.4, 8.6, 11.4, 53.92, 50, 4, "start"),
+        ("Drop 7 layers", "layer", 22.1, 20.8, 23.7, 50.25, 0, -14, "middle"),
     ],
 }
 

@@ -11,26 +11,26 @@ The method removes whole MLP neurons chosen by Taylor importance, physically shr
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/speed-vs-quality-dark.svg">
-  <img src="docs/figures/speed-vs-quality-light.svg" alt="Token F1 against generation speed: uniform 20% pruning is about 7% faster and dropping three layers as well is about 10% faster, both within noise of the unpruned score; dropping seven layers is about 23% faster but loses 4.6 F1." width="880">
+  <img src="docs/figures/speed-vs-quality-light.svg" alt="Token F1 against generation speed: uniform and curve-allocated 20% pruning are about 6 to 7% faster and dropping three layers as well is about 10% faster, all within noise of the unpruned score; dropping seven layers is about 22% faster but loses 4.6 F1." width="880">
 </picture>
 
 | Model | Parameters removed | Batched speed (PyTorch, 16-bit) | Time per token (MLX, 8-bit) | Token F1 | Change in F1 |
 | --- | ---: | --- | --- | ---: | --- |
 | Unpruned + recovery | 0% | reference | reference | 54.89 | reference |
-| Uniform 20% pruning | 20.1% | **+7.2%** [6.3, 8.8] | −9.6% [8.3, 14.9] | 53.29 | −1.60, not detectable |
-| Curve-allocated 20% pruning | 20.0% | about the same as uniform 20% | −7.7% [4.5, 12.4] | 54.58 | −0.31, not detectable |
-| Drop 3 layers + uniform pruning | 20.0% | **+10.0%** [7.6, 11.8] | −12.1% [10.0, 16.5] | 53.92 | −0.96, not detectable |
-| Drop 7 layers | 21.1% | **+22.6%** [21.2, 24.4] | −21.4% [19.9, 25.6] | 50.25 | −4.64, a real loss |
+| Uniform 20% pruning | 20.1% | **+6.0%** [4.4, 6.9] | −9.6% [8.3, 14.9] | 53.29 | −1.60, not detectable |
+| Curve-allocated 20% pruning | 20.0% | **+6.7%** [5.4, 7.6] | −7.7% [4.5, 12.4] | 54.58 | −0.31, not detectable |
+| Drop 3 layers + uniform pruning | 20.0% | **+10.4%** [8.6, 11.4] | −12.1% [10.0, 16.5] | 53.92 | −0.96, not detectable |
+| Drop 7 layers | 21.1% | **+22.1%** [20.8, 23.7] | −21.4% [19.9, 25.6] | 50.25 | −4.64, a real loss |
 | Vocabulary trimming + uniform 20% | 46.2% | **+15.7%** [11.5, 21.2]* | not measured | 51.97 | −2.92, a real loss |
 
-- **Speed** is generation throughput at batch 16 against the unpruned model, with 95% intervals over 50 repeats (20 for MLX). Every model decodes the same 64 forced tokens, so shorter answers cannot flatter a model.
+- **Speed** is generation throughput at batch 16 against the unpruned model, with 95% intervals over 50 repeats (20 for MLX). The PyTorch column is one run with all five models timed in turn. Every model decodes the same 64 forced tokens, so shorter answers cannot flatter a model.
 - **Quality** is token F1 on a 450-example development holdout, averaged over 5 training seeds. It is a word-overlap score, **not** customer-support accuracy. "Not detectable" means both statistical intervals include zero; these runs can resolve differences of about 2 F1.
-- Curve-allocated pruning scored 55.09 in a separate 10-seed retest, where it beat uniform pruning by a confident +1.33 F1. Its PyTorch speed was only measured in an earlier, noisier run (1.00× uniform 20%, interval [0.92, 1.15]).
+- Curve-allocated pruning scored 55.09 in a separate 10-seed retest, where it beat uniform pruning by a confident +1.33 F1. It is as fast as uniform pruning, so the extra quality costs no speed.
 - *Vocabulary trimming cuts the embedding table to the 7,764 tokens seen in training. Its speed comes from an earlier benchmark (5 seeds, 3 repeats each) in which uniform 20% pruning measured +5.7% [3.8, 7.6] and trimming alone +8.1% [5.8, 10.6], so compare it with those figures, not with the 50-repeat rows. Trimming alone costs a confident 1.57 F1, because replies copy document words whose tokens were removed. The code is on [`experiment/6-vocabulary`](../../tree/experiment/6-vocabulary), not `main`.
-- At batch one the gains are similar: 7.2% less time per token for uniform 20%, 6.5% for the 3-layer combination and 11.7% for 7 layers.
+- At batch one the gains are similar: 7.7% less time per token for uniform 20%, 7.4% for curve-allocated, 8.4% for the 3-layer combination and 12.5% for 7 layers.
 - All timings are from one Mac. A data-center GPU with a serving stack was not tested, and the ratios may differ there.
 
-**The short version:** 20% of the model can be removed for a 7–10% speedup with no measurable loss in quality. Going further is possible (+16% for about 3 F1, +23% for about 4.6), but past that point speed is paid for in quality.
+**The short version:** 20% of the model can be removed for a 6–10% speedup with no measurable loss in quality. Going further is possible (+16% for about 3 F1, +22% for about 4.6), but past that point speed is paid for in quality.
 
 ## Size and memory
 
@@ -66,14 +66,14 @@ Quantization saves memory, not arithmetic: the model does the same number of ope
 | 5 | Prune the larger Qwen2.5-1.5B down instead | No gain: it starts no better than the 0.5B on this task | `main` (code and write-up) |
 | 6 | Trim the vocabulary to tokens seen in training | Rejected: as fast as 20% pruning (+8%), but costs a confident 1.57 F1 | [`experiment/6-vocabulary`](../../tree/experiment/6-vocabulary) |
 | 7 | Prune iteratively in several rounds | Rejected: no gain over one-shot pruning | [`experiment/7-iterative`](../../tree/experiment/7-iterative) |
-| 8 | Drop whole transformer layers | Opt-in. With pruning, +10% speed against unpruned, about 3 points more than pruning alone. Dropping 7 layers is +23% but costs 4.6 F1 | `main` |
+| 8 | Drop whole transformer layers | Opt-in. With pruning, +10% speed against unpruned, 3 to 4 points more than pruning alone. Dropping 7 layers is +22% but costs 4.6 F1 | `main` |
 
 **Which option to use**
 
-- **Faster, same quality:** uniform 20% pruning (+7%). Add the 3-layer drop for +10%.
-- **Best quality at 20% smaller:** the curve allocator. Its exports need this project's loader; uniform exports load with stock Hugging Face classes.
+- **Faster, same quality:** uniform 20% pruning (+6%). Add the 3-layer drop for +10%.
+- **Best quality at 20% smaller:** the curve allocator, at the same speed as uniform (+7%). Its exports need this project's loader; uniform exports load with stock Hugging Face classes.
 - **Less memory:** quantize to 8-bit, on its own or on top of pruning.
-- **Faster still, accepting a quality loss:** vocabulary trimming on top of 20% pruning (+16%, −2.9 F1), or dropping 7 layers (+23%, −4.6 F1). Trimming would cost less if the kept vocabulary covered the documents the deployment actually serves.
+- **Faster still, accepting a quality loss:** vocabulary trimming on top of 20% pruning (+16%, −2.9 F1), or dropping 7 layers (+22%, −4.6 F1). Trimming would cost less if the kept vocabulary covered the documents the deployment actually serves.
 - **Not worth it here:** 4-bit quantization and pruning the 1.5B model.
 
 ## How results are judged
