@@ -3,34 +3,54 @@
 [![tests](https://github.com/aryanvvemuri/llm-structured-pruning/actions/workflows/tests.yml/badge.svg)](https://github.com/aryanvvemuri/llm-structured-pruning/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Experiments in making a small language model smaller and faster without losing quality. The model is Qwen2.5-0.5B-Instruct, the task is document-grounded customer-support replies (Doc2Dial), and everything runs locally on an Apple Silicon Mac.
+Making a small language model **faster to run with as little quality loss as possible**. The model is Qwen2.5-0.5B-Instruct, the task is document-grounded customer-support replies (Doc2Dial), and everything runs locally on an Apple Silicon Mac.
 
-The project prunes whole MLP neurons using Taylor importance, physically removes them, and recovers quality with a short rank-8 LoRA pass. On top of that baseline it tests eight proposed improvements, each judged by one predeclared comparison over several training seeds. Ideas that pass are on `main`; ideas that fail are kept on `experiment/*` branches with the reason recorded.
+The method removes whole MLP neurons chosen by Taylor importance, physically shrinks the weight matrices, and recovers quality with a short rank-8 LoRA pass. Removing neurons removes arithmetic, so the model does less work per token on any hardware. On top of that baseline the project tests eight further ideas, each judged by one predeclared comparison over several training seeds. Ideas that pass are on `main`; ideas that fail are kept on `experiment/*` branches with the reason recorded.
 
-## Results at a glance
+## Speed for quality
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/speed-vs-quality-dark.svg">
+  <img src="docs/figures/speed-vs-quality-light.svg" alt="Token F1 against generation speed: uniform 20% pruning is about 7% faster and dropping three layers as well is about 10% faster, both within noise of the unpruned score; dropping seven layers is about 23% faster but loses 4.6 F1." width="880">
+</picture>
+
+| Model | Parameters removed | Batched speed (PyTorch, 16-bit) | Time per token (MLX, 8-bit) | Token F1 | Change in F1 |
+| --- | ---: | --- | --- | ---: | --- |
+| Unpruned + recovery | 0% | reference | reference | 54.89 | reference |
+| Uniform 20% pruning | 20.1% | **+7.2%** [6.3, 8.8] | −9.6% [8.3, 14.9] | 53.29 | −1.60, not detectable |
+| Curve-allocated 20% pruning | 20.0% | about the same as uniform 20% | −7.7% [4.5, 12.4] | 54.58 | −0.31, not detectable |
+| Drop 3 layers + uniform pruning | 20.0% | **+10.0%** [7.6, 11.8] | −12.1% [10.0, 16.5] | 53.92 | −0.96, not detectable |
+| Drop 7 layers | 21.1% | **+22.6%** [21.2, 24.4] | −21.4% [19.9, 25.6] | 50.25 | −4.64, a real loss |
+
+- **Speed** is generation throughput at batch 16 against the unpruned model, with 95% intervals over 50 repeats (20 for MLX). Every model decodes the same 64 forced tokens, so shorter answers cannot flatter a model.
+- **Quality** is token F1 on a 450-example development holdout, averaged over 5 training seeds. It is a word-overlap score, **not** customer-support accuracy. "Not detectable" means both statistical intervals include zero; these runs can resolve differences of about 2 F1.
+- Curve-allocated pruning scored 55.09 in a separate 10-seed retest, where it beat uniform pruning by a confident +1.33 F1. Its PyTorch speed was only measured in an earlier, noisier run (1.00× uniform 20%, interval [0.92, 1.15]).
+- At batch one the gains are similar: 7.2% less time per token for uniform 20%, 6.5% for the 3-layer combination and 11.7% for 7 layers.
+- All timings are from one Mac. A data-center GPU with a serving stack was not tested, and the ratios may differ there.
+
+**The short version:** 20% of the model can be removed for a 7–10% speedup with no measurable loss in quality. Going further is possible, but past that point speed is paid for in quality.
+
+## Size and memory
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/f1-vs-size-dark.svg">
-  <img src="docs/figures/f1-vs-size-light.svg" alt="Token F1 against model size: 8-bit quantization keeps the unpruned score at half the size, 20% pruning costs about 1 F1, and 4-bit quantization or dropping 7 layers costs 3 to 6 F1." width="880">
+  <img src="docs/figures/f1-vs-size-light.svg" alt="Token F1 against weight size: 8-bit quantization keeps the unpruned score at half the size, 20% pruning costs at most 1.6 F1, and 4-bit quantization or dropping 7 layers costs 3 to 6 F1." width="880">
 </picture>
 
-The chart uses the same 5 seeds for every point, so curve-allocated 20% pruning appears at 54.6; its 10-seed retest in the table below gave 55.09. Regenerate it with `python scripts/make_results_figure.py docs/figures`.
+Quantization saves memory, not arithmetic: the model does the same number of operations on smaller weights. It combines with pruning, which is where the two help each other.
 
-Scores are token F1 on a 450-example development holdout. Token F1 is a word-overlap score, **not** customer-support accuracy. The final test split has not been opened for any of these results.
+| Model (MLX) | Weights | Peak memory | Tokens/s, batch one | Token F1 |
+| --- | ---: | ---: | ---: | ---: |
+| Unpruned, 16-bit | 988 MB | 1.82 GB | 181 | 54.81 |
+| Uniform 20%, 16-bit | 790 MB | 1.64 GB | 202 | 53.20 |
+| Unpruned, 8-bit | 525 MB | 1.41 GB | 198 | 54.91 |
+| **Uniform 20%, 8-bit** | **420 MB** | **1.24 GB** | **232** | **53.30** |
+| Unpruned, 4-bit | 278 MB | 1.22 GB | 269 | 50.52 |
+| Uniform 20%, 4-bit | 222 MB | 1.10 GB | 281 | 48.62 |
 
-| Model | Parameters | Token F1 | Notes |
-| --- | ---: | ---: | --- |
-| Original Qwen2.5-0.5B, no training | 494.0M | 22.05 | |
-| Unpruned + recovery | 494.0M | 54.89 | the quality reference |
-| Uniform 10% pruning | 444.5M | 54.32 | −0.57, not distinguishable from unpruned |
-| Uniform 20% pruning | 394.9M | 53.29 | −1.60, not distinguishable from unpruned |
-| Curve-allocated 20% pruning | 395.3M | 55.09 | +1.33 over uniform 20% on 10 fresh seeds |
-| Unpruned, 8-bit (MLX) | 525 MB | 54.91 | half the size, no quality loss |
-| Unpruned, 4-bit (MLX) | 278 MB | 50.52 | costs 4.3–4.6 F1 |
-
-Rows come from separate multi-seed runs (5 seeds unless noted), so compare them through the paired differences in [RESULTS.md](RESULTS.md), not by subtracting table entries.
-
-**Speed.** Uniform 20% pruning generates about 6–7% faster than the unpruned model in batched PyTorch float16 on an Apple GPU, and about 12–17% faster under MLX. Timings were taken on one Mac; a data-center GPU with a serving stack was not tested.
+- **8-bit is free in quality** and halves the weights. Pruned and 8-bit together is 57% smaller and 28% faster than the unpruned 16-bit model, for 1.5 F1.
+- **4-bit is not free:** it costs a confident 4.3–4.6 F1.
+- The 8-bit speedup on a Mac comes from reading fewer bytes of weights. It should not be assumed on other hardware; the pruning speedup comes from doing less work and is the more portable of the two. These tokens/s figures are from a short test (32 prompts, 3 repeats per seed).
 
 ## What worked and what didn't
 
@@ -42,25 +62,27 @@ Rows come from separate multi-seed runs (5 seeds unless noted), so compare them 
 | 3 | Larger dataset and multi-seed statistics | **Accepted.** The measurement basis for everything else | `main` |
 | 4 | 8-bit and 4-bit quantization (MLX) | **Accepted.** 8-bit is free; 4-bit is not | `main` |
 | 5 | Prune the larger Qwen2.5-1.5B down instead | No gain: it starts no better than the 0.5B on this task | `main` (code and write-up) |
-| 6 | Trim the vocabulary to tokens seen in training | Rejected: costs 1.57 F1 | [`experiment/6-vocabulary`](../../tree/experiment/6-vocabulary) |
+| 6 | Trim the vocabulary to tokens seen in training | Rejected: as fast as 20% pruning (+8%), but costs a confident 1.57 F1 | [`experiment/6-vocabulary`](../../tree/experiment/6-vocabulary) |
 | 7 | Prune iteratively in several rounds | Rejected: no gain over one-shot pruning | [`experiment/7-iterative`](../../tree/experiment/7-iterative) |
-| 8 | Drop whole transformer layers | Opt-in. About 3% faster batched at equal size and quality; dropping 7 layers is 14% faster but costs 3 F1 | `main` |
+| 8 | Drop whole transformer layers | Opt-in. With pruning, +10% speed against unpruned, about 3 points more than pruning alone. Dropping 7 layers is +23% but costs 4.6 F1 | `main` |
 
-**Practical advice from these results**
+**Which option to use**
 
-- For the smallest model at no quality cost, quantize to 8-bit first. It beats 20% pruning on both size and quality.
-- For 20% fewer parameters, use the curve allocator. Use uniform pruning when the export must load with stock Hugging Face classes.
-- Pruning and 8-bit quantization stack: uniform 20% at 8-bit is 420 MB at 53.30 F1.
-- Layer dropping and pruning the 1.5B model are not worth it here.
+- **Faster, same quality:** uniform 20% pruning (+7%). Add the 3-layer drop for +10%.
+- **Best quality at 20% smaller:** the curve allocator. Its exports need this project's loader; uniform exports load with stock Hugging Face classes.
+- **Less memory:** quantize to 8-bit, on its own or on top of pruning.
+- **Fastest, accepting a quality loss:** drop 7 layers (+23%, −4.6 F1).
+- **Not worth it here:** 4-bit quantization, vocabulary trimming and pruning the 1.5B model.
 
 ## How results are judged
 
-- Each improvement names **one comparison in advance**. It passes only if two intervals both exclude zero with the same sign: a hierarchical bootstrap over seeds and document families, and a seed-level t interval.
-- Training is repeated over 5 or 10 seeds. Splits keep whole document families together, and the test split stays sealed.
+- Each idea names **one comparison in advance**. It passes only if two intervals both exclude zero with the same sign: a hierarchical bootstrap over seeds and document families, and a seed-level t interval.
+- Training is repeated over 5 or 10 seeds. Splits keep whole document families together, and the final test split has not been opened for any result here.
 - An independent verifier recomputes every reported score from raw predictions before a result is accepted.
-- "Not established" means the experiment could not detect a difference, not that none exists. With 5 seeds the smallest reliably detectable difference is about 2 F1.
+- Speed is measured by repeated, interleaved timing runs with a forced output length, and reported as a ratio with an interval. One early timing run was noisy enough to overstate a gain as 11% that a clean re-run put at 3%; the write-up records both.
+- "Not detectable" means the experiment could not find a difference, not that none exists.
 
-[RESULTS.md](RESULTS.md) has the full numbers, intervals and caveats for every experiment. The rest of this README is reference documentation for running the code. The software has about 500 tests (`pytest -q`).
+[RESULTS.md](RESULTS.md) has the full numbers, intervals and caveats for every experiment. Regenerate the charts with `python scripts/make_results_figure.py docs/figures`. The rest of this README is reference documentation for running the code, which has about 500 tests (`pytest -q`).
 
 ## Setup
 
